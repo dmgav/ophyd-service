@@ -1,8 +1,18 @@
 import logging
 
-from fastapi import APIRouter, Security, WebSocket, WebSocketDisconnect
+import pydantic
+from fastapi import APIRouter, Depends, Security, WebSocket, WebSocketDisconnect
+from packaging import version
 
 from ophyd_service import __version__
+
+from ..settings import get_settings
+from ..utils import get_api_access_manager, get_current_username, get_resource_access_manager
+
+if version.parse(pydantic.__version__) < version.parse("2.0.0"):
+    from pydantic import BaseSettings
+else:
+    from pydantic_settings import BaseSettings
 
 from ..authentication import get_current_principal
 from ..resources import SERVER_RESOURCES as SR
@@ -31,14 +41,24 @@ async def ping_handler(payload: dict = {}, principal=Security(get_current_princi
 
 
 @router.get("/device/read/{device_name:path}")
-async def device_read_handler(device_name: str, principal=Security(get_current_principal, scopes=["read:status"])):
+async def device_read_handler(
+    device_name: str,
+    principal=Security(get_current_principal, scopes=["read:status"]),
+    settings: BaseSettings = Depends(get_settings),
+    api_access_manager=Depends(get_api_access_manager),
+    resource_access_manager=Depends(get_resource_access_manager),
+):
     """
     Return the name of the device. The name may contain slashes.
     """
     # Subdevices are separated by slashes in the API and by dots in the namespace.
+    username = get_current_username(principal=principal, settings=settings, api_access_manager=api_access_manager)[
+        0
+    ]
+    user_group = resource_access_manager.get_resource_group(username)
     device_name = device_name.replace("/", ".")
-    logger.info("Device name: %s", device_name)
-    success, msg, value, req_uid = await SR.environment_manager.device_read(device_name)
+    # logger.debug("User group: %s  Device name: %s", user_group, device_name)
+    success, msg, value, req_uid = await SR.environment_manager.device_read(device_name, user_group=user_group)
     return {"success": success, "msg": msg, "device_name": device_name, "value": value}
 
 

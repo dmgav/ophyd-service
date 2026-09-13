@@ -373,7 +373,7 @@ class RunEngineWorker(Process):
         """
         try:
             result = await asyncio.to_thread(device.read)
-            logger.info("Device '%s' was read (request UID '%s'): %s", device_name, req_uid, result)
+            # logger.debug("Device '%s' was read (request UID '%s'): %s", device_name, req_uid, result)
             # The result is returned to the clients as JSON, so it must be serializable.
             json.dumps(result)
             msg = {"req_uid": req_uid, "success": True, "err_msg": "", "result": result}

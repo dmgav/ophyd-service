@@ -22,6 +22,7 @@ from bluesky_queueserver.manager.profile_ops import load_user_group_permissions
 from .. import __version__
 from .parameters import adjust_startup_options
 from .worker import RunEngineWorker
+from .worker_utils import device_name_is_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ class EnvironmentManager:
 
         self._env_state = EnvState.CLOSED
         self._worker_state = None
+        self._user_group_permissions = {}
         # Serializes the open/close operations, which may be requested concurrently.
         self._lock = asyncio.Lock()
 
@@ -275,6 +277,7 @@ class EnvironmentManager:
                 user_group_permissions = await asyncio.to_thread(
                     load_user_group_permissions, user_group_permissions_path
                 )
+                self._user_group_permissions = user_group_permissions
             except Exception as ex:
                 logger.exception("Failed to open RE Worker environment: %s", ex)
                 return False, f"Failed to open RE Worker environment: {ex}"
@@ -389,11 +392,35 @@ class EnvironmentManager:
     # ------------------------------------------------------------
     #                          Device API
 
-    async def device_read(self, device_name):
+    def _validate_device_name(self, device_name, *, user_group):
+        """
+        Check if the device may be accessed by the user. The name is validated using permissions
+        of the 'root' group and then the permissions of the user group. Raises ``RuntimeError``
+        if the device name is not allowed.
+        """
+        user_groups = self._user_group_permissions.get("user_groups", {})
+
+        for group in ("root", user_group):
+            permissions = user_groups.get(group)
+            if permissions is None:
+                raise RuntimeError(f"Permissions for the user group {group!r} are not defined.")
+
+            # If the lists are not defined, then no devices are allowed.
+            allowed = device_name_is_allowed(
+                device_name,
+                allow_patterns=permissions.get("allowed_devices_read", []),
+                disallow_patterns=permissions.get("forbidden_devices_read", []),
+            )
+
+            if not allowed:
+                raise RuntimeError(f"Device {device_name!r} is not allowed for the user group {group!r}.")
+
+    async def device_read(self, device_name, *, user_group):
         """
         Request the worker to read the device ``device_name`` and wait until the operation is
-        completed. Returns ``(success, err_msg, value, req_uid)``, where ``req_uid`` is used to
-        identify the result of the operation.
+        completed. The device must be allowed for the user group ``user_group``. Returns
+        ``(success, err_msg, value, req_uid)``, where ``req_uid`` is used to identify the result
+        of the operation.
         """
         req_uid = _generate_uid()
         value = None
@@ -404,6 +431,8 @@ class EnvironmentManager:
         try:
             if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
                 raise RuntimeError("RE Worker environment does not exist.")
+
+            self._validate_device_name(device_name, user_group=user_group)
 
             try:
                 response = await self._comm_to_worker.send_msg(
