@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import enum
+import inspect
 import json
 import logging
 import os
@@ -40,6 +41,13 @@ class IPKernelState(enum.Enum):
     BUSY = "busy"
     IDLE = "idle"
     STARTING = "starting"
+
+
+# Device name is a dotted sequence of identifiers, e.g. 'det1' or 'sim_stage.det.val'.
+_device_name_pattern = re.compile(r"[_a-zA-Z][_a-zA-Z0-9]*(\.[_a-zA-Z][_a-zA-Z0-9]*)*")
+
+# Maximum time to wait for the thread running the event loop to exit.
+_LOOP_STOP_TIMEOUT = 5.0
 
 
 class RunEngineWorker(Process):
@@ -127,6 +135,7 @@ class RunEngineWorker(Process):
         self._ip_kernel_is_shut_down_event = None
 
         self._loop = None  # Event loop used by the worker
+        self._loop_thread = None  # Thread that runs the event loop
 
         self._re_namespace, self._devices_in_nspace = {}, {}
 
@@ -301,6 +310,63 @@ class RunEngineWorker(Process):
 
         return {"status": status, "err_msg": err_msg}
 
+    def _device_read_handler(self, device_name, req_uid):
+        """
+        Read the device with the name ``device_name``. The name may refer to a subdevice,
+        e.g. 'sim_stage.det'. ``req_uid`` is the UID of the request, which is used to
+        identify the result of the operation.
+        """
+        logger.debug("Reading the device '%s' (request UID '%s') ...", device_name, req_uid)
+        try:
+            # The name is evaluated, so only dotted identifiers are accepted.
+            if not isinstance(device_name, str) or not _device_name_pattern.fullmatch(device_name):
+                raise ValueError(f"Invalid device name: {device_name!r}")
+
+            # In IPython mode the namespace is the user namespace of the kernel.
+            nspace = self._re_namespace
+            try:
+                device = eval(device_name, nspace, nspace)  # noqa: S307
+            except Exception as ex:
+                raise RuntimeError(f"Device '{device_name}' is not found in the namespace: {ex}") from ex
+
+            if not hasattr(device, "read"):
+                raise RuntimeError(f"Object '{device_name}' has no attribute 'read'")
+
+            if inspect.iscoroutinefunction(device.read):
+                coro = self._device_read_async(device_name, device, req_uid)
+            else:
+                coro = self._device_read_thread(device_name, device, req_uid)
+
+            # The handler is called from the communication thread, the task runs in the worker loop.
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+            status, err_msg = "accepted", ""
+        except Exception as ex:
+            status, err_msg = "rejected", f"Error: {ex}"
+
+        return {"status": status, "err_msg": err_msg}
+
+    async def _device_read_async(self, device_name, device, req_uid):
+        """
+        Read the device with the asynchronous ``read()`` method (e.g. 'ophyd-async' device).
+        """
+        try:
+            result = await device.read()
+            logger.info("Device '%s' was read (request UID '%s'): %s", device_name, req_uid, result)
+        except Exception as ex:
+            logger.exception("Failed to read the device '%s' (request UID '%s'): %s", device_name, req_uid, ex)
+
+    async def _device_read_thread(self, device_name, device, req_uid):
+        """
+        Read the device with the blocking ``read()`` method (e.g. 'ophyd' device). The method
+        is executed in a separate thread, so that the loop is not blocked.
+        """
+        try:
+            result = await asyncio.to_thread(device.read)
+            logger.info("Device '%s' was read (request UID '%s'): %s", device_name, req_uid, result)
+        except Exception as ex:
+            logger.exception("Failed to read the device '%s' (request UID '%s'): %s", device_name, req_uid, ex)
+
     # ------------------------------------------------------------
 
     def _execute_in_main_thread(self):
@@ -309,6 +375,39 @@ class RunEngineWorker(Process):
         so the function simply waits until the environment is closed.
         """
         self._exit_event.wait()
+
+    # ------------------------------------------------------------
+
+    def _start_event_loop(self):
+        """
+        Run the event loop in a separate thread. The loop is used to execute asynchronous tasks,
+        such as reading of devices. The main thread is occupied by the IPython kernel or blocked
+        until the environment is closed, so the loop can not be run in the main thread.
+        """
+
+        def _run_loop():
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_forever()
+
+        self._loop_thread = threading.Thread(target=_run_loop, name="Worker Event Loop", daemon=True)
+        self._loop_thread.start()
+
+    def _stop_event_loop(self):
+        """
+        Stop the event loop and wait until the thread exits. The running tasks are not awaited.
+        """
+        if self._loop_thread is None:
+            return
+
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop_thread.join(timeout=_LOOP_STOP_TIMEOUT)
+
+        if self._loop_thread.is_alive():
+            logger.warning("The thread running the event loop failed to exit")
+        else:
+            self._loop.close()
+
+        self._loop_thread = None
 
     # ------------------------------------------------------------
 
@@ -337,6 +436,7 @@ class RunEngineWorker(Process):
         self._comm_to_manager.add_method(self._command_confirm_exit_handler, "command_confirm_exit")
         self._comm_to_manager.add_method(self._command_permissions_reload_handler, "command_permissions_reload")
         self._comm_to_manager.add_method(self._command_interrupt_kernel_handler, "command_interrupt_kernel")
+        self._comm_to_manager.add_method(self._device_read_handler, "device_read")
 
         self._comm_to_manager.start()
 
@@ -348,6 +448,7 @@ class RunEngineWorker(Process):
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        self._start_event_loop()
 
     def _worker_startup_code(self):
         """
@@ -446,6 +547,7 @@ class RunEngineWorker(Process):
         clear_re_worker_active()
         clear_ipython_mode()
 
+        self._stop_event_loop()
         self._comm_to_manager.stop()
 
     def _run_loop_python(self):

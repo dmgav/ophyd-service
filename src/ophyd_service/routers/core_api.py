@@ -30,13 +30,16 @@ async def ping_handler(payload: dict = {}, principal=Security(get_current_princi
     return msg
 
 
-@router.get("/device/{device_name:path}")
-async def device_name_handler(device_name: str, principal=Security(get_current_principal, scopes=["read:status"])):
+@router.get("/device/read/{device_name:path}")
+async def device_read_handler(device_name: str, principal=Security(get_current_principal, scopes=["read:status"])):
     """
     Return the name of the device. The name may contain slashes.
     """
+    # Subdevices are separated by slashes in the API and by dots in the namespace.
+    device_name = device_name.replace("/", ".")
     logger.info("Device name: %s", device_name)
-    return {"success": True, "msg": "", "device_name": device_name}
+    success, msg, req_uid = await SR.environment_manager.device_read(device_name)
+    return {"success": success, "msg": msg, "device_name": device_name}
 
 
 @router.post("/environment/open")

@@ -360,6 +360,31 @@ class EnvironmentManager:
             return success, err_msg
 
     # ------------------------------------------------------------
+    #                          Device API
+
+    async def device_read(self, device_name):
+        """
+        Request the worker to read the device ``device_name``. The worker starts the operation
+        and responds without waiting for it to complete. Returns ``(success, err_msg, req_uid)``,
+        where ``req_uid`` is used to identify the result of the operation.
+        """
+        req_uid = _generate_uid()
+
+        if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
+            return False, "RE Worker environment does not exist.", req_uid
+
+        try:
+            response = await self._comm_to_worker.send_msg(
+                "device_read", {"device_name": device_name, "req_uid": req_uid}
+            )
+        except Exception as ex:
+            logger.exception("Failed to send the request to read the device '%s': %s", device_name, ex)
+            return False, f"Failed to send the request to read the device: {ex}", req_uid
+
+        success = response.get("status") == "accepted"
+        return success, response.get("err_msg") or "", req_uid
+
+    # ------------------------------------------------------------
     #                            Shutdown
 
     async def stop(self):
