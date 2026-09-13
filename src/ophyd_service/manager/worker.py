@@ -381,8 +381,8 @@ class RunEngineWorker(Process):
     def _start_event_loop(self):
         """
         Run the event loop in a separate thread. The loop is used to execute asynchronous tasks,
-        such as reading of devices. The main thread is occupied by the IPython kernel or blocked
-        until the environment is closed, so the loop can not be run in the main thread.
+        such as reading of devices. In Python mode the main thread is blocked until the environment
+        is closed, so the loop can not be run in the main thread.
         """
 
         def _run_loop():
@@ -448,7 +448,8 @@ class RunEngineWorker(Process):
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._start_event_loop()
+        if not self._use_ipython_kernel:
+            self._start_event_loop()
 
     def _worker_startup_code(self):
         """

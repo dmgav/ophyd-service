@@ -19,6 +19,7 @@ from bluesky_queueserver.manager.comms import PipeJsonRpcSendAsync
 from bluesky_queueserver.manager.profile_ops import load_user_group_permissions
 
 from .. import __version__
+from .parameters import adjust_startup_options
 from .worker import RunEngineWorker
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ class EnvironmentManager:
     ):
         self._worker_config = default_worker_config()
         self._worker_config.update(worker_config or {})
+        adjust_startup_options(self._worker_config)
 
         self._close_timeout = close_timeout
         self._log_level = log_level
@@ -275,6 +277,30 @@ class EnvironmentManager:
     # ------------------------------------------------------------
     #                       Close environment
 
+    async def _cleanup(self):
+        if self._comm_to_worker is not None:
+            self._comm_to_worker.stop()
+            self._comm_to_worker = None
+            # The polling threads raise an error if the connection is closed while in use.
+            await asyncio.sleep(_COMM_STOP_DELAY)
+
+        self._process = None
+        self._worker_state = None
+
+    async def _destroy_worker(self):
+        """
+        Kill the worker process and release the resources.
+        """
+        if self.is_running:
+            logger.warning("Killing the worker process ...")
+            try:
+                self._process.kill()
+                await asyncio.to_thread(self._process.join)
+            except Exception as ex:
+                logger.exception("Failed to kill the worker process: %s", ex)
+
+        await self._cleanup()
+
     async def close_environment(self):
         """
         Close the environment in an orderly way. The worker process is killed if it fails
@@ -314,30 +340,6 @@ class EnvironmentManager:
 
             return True, ""
 
-        async def _cleanup():
-            if self._comm_to_worker is not None:
-                self._comm_to_worker.stop()
-                self._comm_to_worker = None
-                # The polling threads raise an error if the connection is closed while in use.
-                await asyncio.sleep(_COMM_STOP_DELAY)
-
-            self._process = None
-            self._worker_state = None
-
-        async def _destroy_worker():
-            """
-            Kill the worker process and release the resources.
-            """
-            if self.is_running:
-                logger.warning("Killing the worker process ...")
-                try:
-                    self._process.kill()
-                    await asyncio.to_thread(self._process.join)
-                except Exception as ex:
-                    logger.exception("Failed to kill the worker process: %s", ex)
-
-            await _cleanup()
-
         async with self._lock:
             if (self._env_state != EnvState.OPEN) or not self.is_running:
                 return False, "RE Worker environment does not exist."
@@ -350,10 +352,10 @@ class EnvironmentManager:
 
             if not success or self.is_running:
                 logger.error("Failed to close RE Worker environment in an orderly way: %s", err_msg)
-                await _destroy_worker()
+                await self._destroy_worker()
                 success, err_msg = True, f"The worker process was killed: {err_msg}"
             else:
-                await _cleanup()
+                await self._cleanup()
                 logger.info("RE Worker environment was closed successfully")
 
             self._env_state = EnvState.CLOSED
@@ -448,7 +450,7 @@ class EnvironmentManager:
 
     def _publish_status(self):
         msg = {"status": self.get_status()}
-        logger.info(f"The number of status subscribers: {len(self._status_subscribers)}")
+        # logger.debug(f"The number of status subscribers: {len(self._status_subscribers)}")
         for queue in self._status_subscribers:
             if queue.full():
                 # The subscriber is not reading the messages fast enough: drop the oldest one.

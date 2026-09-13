@@ -24,6 +24,10 @@ properties:
         type: string
       startup_script_path:
         type: string
+      startup_profile: 
+        type: string
+      ipython_dir:
+        type: string
       existing_plans_and_devices_path:
         type: string
       user_group_permissions_path:
