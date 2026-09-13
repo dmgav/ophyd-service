@@ -14,7 +14,6 @@ import multiprocessing
 import threading
 import time as ttime
 import uuid
-from datetime import datetime
 
 from bluesky_queueserver.manager.comms import PipeJsonRpcSendAsync
 from bluesky_queueserver.manager.profile_ops import load_user_group_permissions
@@ -22,7 +21,7 @@ from bluesky_queueserver.manager.profile_ops import load_user_group_permissions
 from .. import __version__
 from .parameters import adjust_startup_options
 from .worker import RunEngineWorker
-from .worker_utils import device_name_is_allowed
+from .worker_utils import device_name_is_allowed, get_timestamp_iso8601
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +33,14 @@ _COMM_STOP_DELAY = 0.25
 _STATE_MONITOR_PERIOD = 1.0
 # Maximum number of status messages buffered for a subscriber that fails to read them in time.
 _STATUS_QUEUE_MAXSIZE = 100
+# Maximum number of monitor messages buffered for a subscriber that fails to read them in time.
+_MONITOR_QUEUE_MAXSIZE = 100
 # Maximum time to wait for the worker to complete an operation on a device.
 _DEVICE_OPERATION_TIMEOUT = 600.0
 # The message that tells the thread reading the device queue to exit.
 _DEVICE_QUEUE_STOP = "__stop_reading_device_queue__"
+# The message that tells the thread reading the stream queue to exit.
+_STREAM_QUEUE_STOP = "__stop_reading_stream_queue__"
 # Maximum time to wait for the thread reading the device queue to exit.
 _DEVICE_QUEUE_STOP_TIMEOUT = 5.0
 # Delay before the next attempt to read the device queue after a failure.
@@ -127,6 +130,8 @@ class EnvironmentManager:
         self._env_state_monitor_task = None
         self._device_queue_monitor_task = None
         self._device_queue_bridge_thread = None
+        self._stream_queue_monitor_task = None
+        self._stream_queue_bridge_thread = None
 
         # The pipe and the queue are owned by the server process and reused by each new
         # worker process. The pipe is flushed before a new worker process is started.
@@ -136,9 +141,12 @@ class EnvironmentManager:
 
         # The messages read from 'self._device_queue' are passed to the loop using this queue.
         self._device_queue_async = asyncio.Queue()
+        # The messages read from 'self._stream_queue' are passed to the loop using this queue.
+        self._stream_queue_async = asyncio.Queue()
 
         # One queue per subscriber (e.g. an open websocket connection).
         self._status_subscribers = set()
+        self._monitor_subscribers = set()
 
         # Pending calls to the worker: 'req_uid' -> set
         self._pending_calls = {}
@@ -153,6 +161,7 @@ class EnvironmentManager:
         self._loop = asyncio.get_running_loop()
         self._start_state_monitor()
         self._start_device_queue_monitor()
+        self._start_stream_queue_monitor()
 
     @property
     def env_state(self):
@@ -170,12 +179,6 @@ class EnvironmentManager:
     def is_running(self):
         return (self._process is not None) and self._process.is_alive()
 
-    def _get_timestamp_iso8601(self):
-        """
-        Returns current timestamp in ISO 8601 format.
-        """
-        return datetime.now().isoformat()
-
     def get_status(self):
         """
         Status of the service in the form of a dictionary.
@@ -183,7 +186,7 @@ class EnvironmentManager:
         worker_state = self._worker_state or {}
         return {
             "msg": f"ophyd-service v{__version__}",
-            "time": self._get_timestamp_iso8601(),
+            "time": get_timestamp_iso8601(),
             "manager_state": self._env_state.value,
             "worker_environment_exists": self._env_state == EnvState.OPEN,
             "worker_environment_state": worker_state.get("environment_state", None),
@@ -536,6 +539,67 @@ class EnvironmentManager:
             event.set()
 
     # ------------------------------------------------------------
+    #                      Stream queue monitor
+
+    def _start_stream_queue_monitor(self):
+        """
+        Start the thread that reads the queue shared with the worker process and the task that
+        delivers the data on the monitored PVs to the subscribers.
+        """
+        if self._stream_queue_bridge_thread is None:
+            self._stream_queue_bridge_thread = threading.Thread(
+                target=self._stream_queue_bridge, name="Stream Queue Bridge", daemon=True
+            )
+            self._stream_queue_bridge_thread.start()
+
+        if self._stream_queue_monitor_task is None:
+            self._stream_queue_monitor_task = asyncio.create_task(self._stream_queue_monitor())
+
+    async def _stop_stream_queue_monitor(self):
+        """
+        Stop the task and the thread and wait until they exit.
+        """
+        if self._stream_queue_monitor_task is not None:
+            self._stream_queue_monitor_task.cancel()
+            try:
+                await self._stream_queue_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._stream_queue_monitor_task = None
+
+        if self._stream_queue_bridge_thread is not None:
+            # The sentinel wakes up the blocking call in the thread.
+            self._stream_queue.put(_STREAM_QUEUE_STOP)
+            await asyncio.to_thread(self._stream_queue_bridge_thread.join, _DEVICE_QUEUE_STOP_TIMEOUT)
+            if self._stream_queue_bridge_thread.is_alive():
+                logger.warning("The thread reading the stream queue failed to exit")
+            self._stream_queue_bridge_thread = None
+
+    def _stream_queue_bridge(self):
+        """
+        Read the messages from the queue shared with the worker process and pass them to the loop.
+        'multiprocessing.Queue' has no asynchronous API, so the blocking calls are executed in
+        this thread.
+        """
+        while True:
+            try:
+                msg = self._stream_queue.get()
+            except Exception as ex:
+                logger.exception("Failed to read the message from the stream queue: %s", ex)
+                ttime.sleep(_DEVICE_QUEUE_ERROR_DELAY)
+                continue
+
+            if msg == _STREAM_QUEUE_STOP:
+                break
+
+            self._loop.call_soon_threadsafe(self._stream_queue_async.put_nowait, msg)
+
+    async def _stream_queue_monitor(self):
+        while True:
+            msg = await self._stream_queue_async.get()
+            self._publish_monitor(msg)
+
+    # ------------------------------------------------------------
     #                            Shutdown
 
     async def stop(self):
@@ -550,6 +614,7 @@ class EnvironmentManager:
 
         await self._stop_state_monitor()
         await self._stop_device_queue_monitor()
+        await self._stop_stream_queue_monitor()
 
         for conn in (self._conn_server, self._conn_worker):
             try:
@@ -616,6 +681,30 @@ class EnvironmentManager:
             else:
                 self._worker_state = None
             self._publish_status()
+
+    # ------------------------------------------------------------
+    #                        Monitored data
+
+    @contextlib.contextmanager
+    def subscribe_monitor(self):
+        """
+        Context manager that yields a queue receiving the data on the monitored PVs published
+        while the subscription is active. Each subscriber gets its own queue and its own copy
+        of every message.
+        """
+        queue = asyncio.Queue(maxsize=_MONITOR_QUEUE_MAXSIZE)
+        self._monitor_subscribers.add(queue)
+        try:
+            yield queue
+        finally:
+            self._monitor_subscribers.discard(queue)
+
+    def _publish_monitor(self, msg):
+        for queue in self._monitor_subscribers:
+            if queue.full():
+                # The subscriber is not reading the messages fast enough: drop the oldest one.
+                queue.get_nowait()
+            queue.put_nowait(msg)
 
     # ------------------------------------------------------------
 

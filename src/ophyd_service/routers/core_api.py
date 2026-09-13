@@ -97,3 +97,21 @@ async def status_websocket_handler(websocket: WebSocket):
         except RuntimeError as ex:
             # Raised if the connection is closed while the message is sent.
             logger.debug("The status websocket was closed: %s", ex)
+
+
+@router.websocket("/monitor")
+async def monitor_websocket_handler(websocket: WebSocket):
+    """
+    Stream the data on the monitored PVs published by the environment manager. Only the messages
+    published while the connection is open are sent to the client.
+    """
+    await websocket.accept()
+    with SR.environment_manager.subscribe_monitor() as queue:
+        try:
+            while True:
+                await websocket.send_json(await queue.get())
+        except WebSocketDisconnect:
+            logger.debug("The client disconnected from the monitor websocket.")
+        except RuntimeError as ex:
+            # Raised if the connection is closed while the message is sent.
+            logger.debug("The monitor websocket was closed: %s", ex)

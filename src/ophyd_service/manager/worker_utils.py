@@ -2,10 +2,18 @@ import importlib
 import logging
 import os
 import re
+from datetime import datetime
 
 from bluesky_queueserver.manager.profile_ops import _split_name_pattern
 
 logger = logging.getLogger(__name__)
+
+
+def get_timestamp_iso8601():
+    """
+    Returns current timestamp in ISO 8601 format.
+    """
+    return datetime.now().isoformat()
 
 
 def get_default_startup_dir():

@@ -23,6 +23,8 @@ from bluesky_queueserver.manager.profile_ops import (
     update_existing_plans_and_devices,
 )
 
+from .worker_utils import get_timestamp_iso8601
+
 logger = logging.getLogger(__name__)
 
 
@@ -192,6 +194,8 @@ class RunEngineWorker(Process):
         """
         Returns the state information of RE Worker environment.
         """
+        self._stream_queue.put({"heartbeat": {"time": get_timestamp_iso8601()}})
+
         env_state_str = self._env_state.value
         plans_and_devices_list_updated = self._existing_plans_and_devices_changed
         ip_kernel_state = self._ip_kernel_state.value
