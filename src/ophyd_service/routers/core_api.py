@@ -38,8 +38,8 @@ async def device_read_handler(device_name: str, principal=Security(get_current_p
     # Subdevices are separated by slashes in the API and by dots in the namespace.
     device_name = device_name.replace("/", ".")
     logger.info("Device name: %s", device_name)
-    success, msg, req_uid = await SR.environment_manager.device_read(device_name)
-    return {"success": success, "msg": msg, "device_name": device_name}
+    success, msg, value, req_uid = await SR.environment_manager.device_read(device_name)
+    return {"success": success, "msg": msg, "device_name": device_name, "value": value}
 
 
 @router.post("/environment/open")

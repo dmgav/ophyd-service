@@ -59,8 +59,10 @@ class RunEngineWorker(Process):
     ----------
     conn: multiprocessing.Connection
         One end of bidirectional (input/output) pipe. The other end is used by RE Manager.
-    msg_queue: multiprocessing.Queue
+    device_queue: multiprocessing.Queue
         Queue used to pass messages from the worker to the process that owns the worker.
+    stream_queue: multiprocessing.Queue
+        Queue used to pass the data on the monitored PVs to the process that owns the worker.
     args, kwargs
         `args` and `kwargs` of the `multiprocessing.Process`
     """
@@ -70,7 +72,8 @@ class RunEngineWorker(Process):
         *args,
         conn,
         config=None,
-        msg_queue=None,
+        device_queue=None,
+        stream_queue=None,
         log_level=logging.DEBUG,
         user_group_permissions=None,
         **kwargs,
@@ -81,7 +84,8 @@ class RunEngineWorker(Process):
         super().__init__(*args, **kwargs)
 
         self._log_level = log_level
-        self._msg_queue = msg_queue
+        self._device_queue = device_queue
+        self._stream_queue = stream_queue
 
         self._user_group_permissions = user_group_permissions or {}
 
@@ -353,8 +357,14 @@ class RunEngineWorker(Process):
         try:
             result = await device.read()
             logger.info("Device '%s' was read (request UID '%s'): %s", device_name, req_uid, result)
+            # The result is returned to the clients as JSON, so it must be serializable.
+            json.dumps(result)
+            msg = {"req_uid": req_uid, "success": True, "err_msg": "", "result": result}
         except Exception as ex:
             logger.exception("Failed to read the device '%s' (request UID '%s'): %s", device_name, req_uid, ex)
+            msg = {"req_uid": req_uid, "success": False, "err_msg": f"Error: {ex}", "result": None}
+
+        self._device_queue.put(msg)
 
     async def _device_read_thread(self, device_name, device, req_uid):
         """
@@ -364,8 +374,14 @@ class RunEngineWorker(Process):
         try:
             result = await asyncio.to_thread(device.read)
             logger.info("Device '%s' was read (request UID '%s'): %s", device_name, req_uid, result)
+            # The result is returned to the clients as JSON, so it must be serializable.
+            json.dumps(result)
+            msg = {"req_uid": req_uid, "success": True, "err_msg": "", "result": result}
         except Exception as ex:
             logger.exception("Failed to read the device '%s' (request UID '%s'): %s", device_name, req_uid, ex)
+            msg = {"req_uid": req_uid, "success": False, "err_msg": f"Error: {ex}", "result": None}
+
+        self._device_queue.put(msg)
 
     # ------------------------------------------------------------
 

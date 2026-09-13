@@ -11,6 +11,7 @@ import contextlib
 import enum
 import logging
 import multiprocessing
+import threading
 import time as ttime
 import uuid
 from datetime import datetime
@@ -32,6 +33,14 @@ _COMM_STOP_DELAY = 0.25
 _STATE_MONITOR_PERIOD = 1.0
 # Maximum number of status messages buffered for a subscriber that fails to read them in time.
 _STATUS_QUEUE_MAXSIZE = 100
+# Maximum time to wait for the worker to complete an operation on a device.
+_DEVICE_OPERATION_TIMEOUT = 600.0
+# The message that tells the thread reading the device queue to exit.
+_DEVICE_QUEUE_STOP = "__stop_reading_device_queue__"
+# Maximum time to wait for the thread reading the device queue to exit.
+_DEVICE_QUEUE_STOP_TIMEOUT = 5.0
+# Delay before the next attempt to read the device queue after a failure.
+_DEVICE_QUEUE_ERROR_DELAY = 0.5
 
 
 def _generate_uid():
@@ -115,14 +124,23 @@ class EnvironmentManager:
         self._process = None
         self._comm_to_worker = None
         self._env_state_monitor_task = None
+        self._device_queue_monitor_task = None
+        self._device_queue_bridge_thread = None
 
         # The pipe and the queue are owned by the server process and reused by each new
         # worker process. The pipe is flushed before a new worker process is started.
         self._conn_server, self._conn_worker = multiprocessing.Pipe()
-        self._msg_queue = multiprocessing.Queue()
+        self._device_queue = multiprocessing.Queue()
+        self._stream_queue = multiprocessing.Queue()
+
+        # The messages read from 'self._device_queue' are passed to the loop using this queue.
+        self._device_queue_async = asyncio.Queue()
 
         # One queue per subscriber (e.g. an open websocket connection).
         self._status_subscribers = set()
+
+        # Pending calls to the worker: 'req_uid' -> set
+        self._pending_calls = {}
 
         self._env_state = EnvState.CLOSED
         self._worker_state = None
@@ -130,15 +148,21 @@ class EnvironmentManager:
         self._lock = asyncio.Lock()
 
         # The constructor is called from the running loop (server startup).
+        self._loop = asyncio.get_running_loop()
         self._start_state_monitor()
+        self._start_device_queue_monitor()
 
     @property
     def env_state(self):
         return self._env_state
 
     @property
-    def msg_queue(self):
-        return self._msg_queue
+    def device_queue(self):
+        return self._device_queue
+
+    @property
+    def stream_queue(self):
+        return self._stream_queue
 
     @property
     def is_running(self):
@@ -203,7 +227,8 @@ class EnvironmentManager:
 
             self._process = RunEngineWorker(
                 conn=self._conn_worker,
-                msg_queue=self._msg_queue,
+                device_queue=self._device_queue,
+                stream_queue=self._stream_queue,
                 name="Worker Process",
                 config=self._worker_config,
                 log_level=self._log_level,
@@ -366,25 +391,120 @@ class EnvironmentManager:
 
     async def device_read(self, device_name):
         """
-        Request the worker to read the device ``device_name``. The worker starts the operation
-        and responds without waiting for it to complete. Returns ``(success, err_msg, req_uid)``,
-        where ``req_uid`` is used to identify the result of the operation.
+        Request the worker to read the device ``device_name`` and wait until the operation is
+        completed. Returns ``(success, err_msg, value, req_uid)``, where ``req_uid`` is used to
+        identify the result of the operation.
         """
         req_uid = _generate_uid()
-
-        if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
-            return False, "RE Worker environment does not exist.", req_uid
+        value = None
+        # The event is set once the result of the operation is received from the worker.
+        event, result = asyncio.Event(), {}
+        self._pending_calls[req_uid] = (event, result)
 
         try:
-            response = await self._comm_to_worker.send_msg(
-                "device_read", {"device_name": device_name, "req_uid": req_uid}
-            )
-        except Exception as ex:
-            logger.exception("Failed to send the request to read the device '%s': %s", device_name, ex)
-            return False, f"Failed to send the request to read the device: {ex}", req_uid
+            if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
+                raise RuntimeError("RE Worker environment does not exist.")
 
-        success = response.get("status") == "accepted"
-        return success, response.get("err_msg") or "", req_uid
+            try:
+                response = await self._comm_to_worker.send_msg(
+                    "device_read", {"device_name": device_name, "req_uid": req_uid}
+                )
+            except Exception as ex:
+                logger.exception("Failed to send the request to read the device '%s': %s", device_name, ex)
+                raise RuntimeError(f"Failed to send the request to read the device: {ex}") from ex
+
+            if response.get("status") != "accepted":
+                raise RuntimeError(response.get("err_msg") or "The request to read the device was rejected.")
+
+            try:
+                await asyncio.wait_for(event.wait(), timeout=_DEVICE_OPERATION_TIMEOUT)
+            except asyncio.TimeoutError as ex:
+                raise RuntimeError("Timeout while waiting for the device to be read.") from ex
+
+            if not result.get("success"):
+                raise RuntimeError(result.get("err_msg") or "Failed to read the device.")
+
+            value = result.get("result")
+
+            success, err_msg = True, ""
+        except RuntimeError as ex:
+            success, err_msg = False, str(ex)
+        finally:
+            self._pending_calls.pop(req_uid, None)
+
+        return success, err_msg, value, req_uid
+
+    # ------------------------------------------------------------
+    #                      Device queue monitor
+
+    def _start_device_queue_monitor(self):
+        """
+        Start the thread that reads the queue shared with the worker process and the task that
+        delivers the results of the operations on devices to the callers.
+        """
+        if self._device_queue_bridge_thread is None:
+            self._device_queue_bridge_thread = threading.Thread(
+                target=self._device_queue_bridge, name="Device Queue Bridge", daemon=True
+            )
+            self._device_queue_bridge_thread.start()
+
+        if self._device_queue_monitor_task is None:
+            self._device_queue_monitor_task = asyncio.create_task(self._device_queue_monitor())
+
+    async def _stop_device_queue_monitor(self):
+        """
+        Stop the task and the thread and wait until they exit.
+        """
+        if self._device_queue_monitor_task is not None:
+            self._device_queue_monitor_task.cancel()
+            try:
+                await self._device_queue_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._device_queue_monitor_task = None
+
+        if self._device_queue_bridge_thread is not None:
+            # The sentinel wakes up the blocking call in the thread.
+            self._device_queue.put(_DEVICE_QUEUE_STOP)
+            await asyncio.to_thread(self._device_queue_bridge_thread.join, _DEVICE_QUEUE_STOP_TIMEOUT)
+            if self._device_queue_bridge_thread.is_alive():
+                logger.warning("The thread reading the device queue failed to exit")
+            self._device_queue_bridge_thread = None
+
+    def _device_queue_bridge(self):
+        """
+        Read the messages from the queue shared with the worker process and pass them to the loop.
+        'multiprocessing.Queue' has no asynchronous API, so the blocking calls are executed in
+        this thread.
+        """
+        while True:
+            try:
+                msg = self._device_queue.get()
+            except Exception as ex:
+                logger.exception("Failed to read the message from the device queue: %s", ex)
+                ttime.sleep(_DEVICE_QUEUE_ERROR_DELAY)
+                continue
+
+            if msg == _DEVICE_QUEUE_STOP:
+                break
+
+            self._loop.call_soon_threadsafe(self._device_queue_async.put_nowait, msg)
+
+    async def _device_queue_monitor(self):
+        while True:
+            msg = await self._device_queue_async.get()
+
+            req_uid = msg.get("req_uid") if isinstance(msg, dict) else None
+            pending_call = self._pending_calls.get(req_uid)
+
+            if pending_call is None:
+                # The caller is no longer waiting for the result (e.g. the request timed out).
+                logger.warning("Received the result of an unknown request: %s", req_uid)
+                continue
+
+            event, result = pending_call
+            result.update(msg)
+            event.set()
 
     # ------------------------------------------------------------
     #                            Shutdown
@@ -400,6 +520,7 @@ class EnvironmentManager:
                 logger.error("Failed to close the RE Worker environment: %s", err_msg)
 
         await self._stop_state_monitor()
+        await self._stop_device_queue_monitor()
 
         for conn in (self._conn_server, self._conn_worker):
             try:
@@ -408,9 +529,10 @@ class EnvironmentManager:
                 logger.debug("Failed to close the communication pipe: %s", ex)
 
         try:
-            self._msg_queue.close()
+            self._device_queue.close()
+            self._stream_queue.close()
         except Exception as ex:
-            logger.debug("Failed to close the message queue: %s", ex)
+            logger.debug("Failed to close the queue: %s", ex)
 
     # ------------------------------------------------------------
     #                        State monitor
