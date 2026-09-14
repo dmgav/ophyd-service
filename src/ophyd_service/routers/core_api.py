@@ -135,9 +135,13 @@ async def monitor_websocket_handler(websocket: WebSocket):
 
             logger.debug("Message received from a monitor websocket client: %s", msg)
             result = await SR.environment_manager.subscribe_monitor_devices(device_names, queue)
-            accepted_devices = result["accepted_device_names"]
             async with send_lock:
-                await websocket.send_json({"accepted_devices": accepted_devices})
+                await websocket.send_json(
+                    {
+                        "requested_devices": result["requested_device_names"],
+                        "accepted_devices": result["accepted_device_names"],
+                    }
+                )
 
     await websocket.accept()
     async with SR.environment_manager.subscribe_monitor() as queue:

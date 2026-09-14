@@ -179,9 +179,6 @@ def adjust_startup_options(worker_config):
         user_group_permissions_path = os.path.join(user_group_permissions_path, default_user_group_pd_fln)
     worker_config["user_group_permissions_path"] = user_group_permissions_path
 
-    print(f"===================== {startup_dir=}")  ##
-    print(f"===================== {aux_dir=}")  ##
-    print(f"===================== {demo_mode=}")  ##
     worker_config.update(
         {
             "startup_dir": startup_dir,

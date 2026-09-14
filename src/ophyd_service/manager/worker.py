@@ -55,6 +55,9 @@ _LOOP_STOP_TIMEOUT = 5.0
 # Maximum time to wait for an 'ophyd-async' device to subscribe or unsubscribe.
 _DEVICE_SUBSCRIBE_TIMEOUT = 10.0
 
+# Minimum period between the heartbeat messages published by the worker.
+_HEARTBEAT_PERIOD = 1.0
+
 
 def _device_is_ophyd_async(device):
     """
@@ -161,6 +164,9 @@ class RunEngineWorker(Process):
         # Monitored devices: device name -> cid of the subscription.
         self._monitored_devices = {}
 
+        # Time when the last heartbeat message was published.
+        self._heartbeat_time = None
+
         self._worker_shutdown_initiated = False  # Indicates if shutdown is initiated by request
         self._unexpected_shutdown = False  # Indicates if shutdown is in progress, but it was not requested
 
@@ -210,7 +216,10 @@ class RunEngineWorker(Process):
         """
         Returns the state information of RE Worker environment.
         """
-        self._stream_queue.put({"heartbeat": {"time": get_timestamp_iso8601()}})
+        t = ttime.monotonic()
+        if (self._heartbeat_time is None) or (t - self._heartbeat_time >= _HEARTBEAT_PERIOD):
+            self._heartbeat_time = t
+            self._stream_queue.put({"heartbeat": {"time": get_timestamp_iso8601()}})
 
         env_state_str = self._env_state.value
         plans_and_devices_list_updated = self._existing_plans_and_devices_changed
@@ -417,38 +426,37 @@ class RunEngineWorker(Process):
 
             for device_name in device_names:
                 try:
-                    if device_name in self._monitored_devices:
-                        continue
+                    if device_name not in self._monitored_devices:
+                        # The name is evaluated, so only dotted identifiers are accepted.
+                        if not isinstance(device_name, str) or not _device_name_pattern.fullmatch(device_name):
+                            raise ValueError(f"Invalid device name: {device_name!r}")
 
-                    # The name is evaluated, so only dotted identifiers are accepted.
-                    if not isinstance(device_name, str) or not _device_name_pattern.fullmatch(device_name):
-                        raise ValueError(f"Invalid device name: {device_name!r}")
+                        nspace = self._re_namespace
+                        try:
+                            device = eval(device_name, nspace, nspace)  # noqa: S307
+                        except Exception as ex:
+                            raise RuntimeError(f"Device is not found in the namespace: {ex}") from ex
 
-                    nspace = self._re_namespace
-                    try:
-                        device = eval(device_name, nspace, nspace)  # noqa: S307
-                    except Exception as ex:
-                        raise RuntimeError(f"Device is not found in the namespace: {ex}") from ex
+                        if not hasattr(device, "subscribe"):
+                            raise RuntimeError("The device has no attribute 'subscribe'")
 
-                    if not hasattr(device, "subscribe"):
-                        raise RuntimeError("The device has no attribute 'subscribe'")
+                        if _device_is_ophyd_async(device):
+                            # An 'ophyd-async' device may be subscribed only from the thread that runs
+                            #   the event loop, and 'clear_sub' accepts the callback instead of a CID.
+                            callback = self._create_monitor_callback_async(device_name)
+                            future = asyncio.run_coroutine_threadsafe(
+                                self._device_subscribe_async(device, callback), self._loop
+                            )
+                            future.result(timeout=_DEVICE_SUBSCRIBE_TIMEOUT)
+                            cid = callback
+                        else:
+                            callback = self._create_monitor_callback(device_name)
+                            cid = device.subscribe(callback)
 
-                    if _device_is_ophyd_async(device):
-                        # An 'ophyd-async' device may be subscribed only from the thread that runs
-                        #   the event loop, and 'clear_sub' accepts the callback instead of a CID.
-                        callback = self._create_monitor_callback_async(device_name)
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._device_subscribe_async(device, callback), self._loop
-                        )
-                        future.result(timeout=_DEVICE_SUBSCRIBE_TIMEOUT)
-                        cid = callback
-                    else:
-                        callback = self._create_monitor_callback(device_name)
-                        cid = device.subscribe(callback)
+                        self._monitored_devices[device_name] = cid
+                        logger.info("Started monitoring the device '%s'", device_name)
 
-                    self._monitored_devices[device_name] = cid
                     monitored_device_names.append(device_name)
-                    logger.info("Started monitoring the device '%s'", device_name)
 
                 except Exception as ex:
                     logger.warning("Failed to start monitoring the device '%s': %s", device_name, ex)

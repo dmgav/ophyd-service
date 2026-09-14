@@ -200,7 +200,6 @@ class EnvironmentManager:
             sdir = config.get("startup_dir") or profile_name_to_startup_dir(
                 config.get("startup_profile"), config.get("ipython_dir")
             )
-            print("============== sdir=")  ##
             create_demo_ipython_profile(sdir)
             logger.info("Temporary IPython profile was created (%r)", sdir)
         except Exception as ex:
@@ -501,18 +500,18 @@ class EnvironmentManager:
     async def device_monitor_request(self, device_names):
         """
         Request the worker to monitor the devices with the names from the list ``device_names``.
-        Returns the names of the devices for which monitoring was enabled. The list is empty
-        if the request failed.
+        Returns the names of the devices for which monitoring was enabled. Returns ``None``
+        if the environment is not open or the request failed.
         """
-        try:
-            if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
-                raise RuntimeError("RE Worker environment does not exist.")
+        if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
+            return None
 
+        try:
             response = await self._comm_to_worker.send_msg("device_monitor", {"device_names": device_names})
             return response.get("monitored_device_names", [])
         except Exception as ex:
             logger.error("Failed to send the request to monitor the devices %s: %s", device_names, ex)
-            return []
+            return None
 
     async def device_unmonitor_request(self, device_names):
         """
@@ -765,19 +764,22 @@ class EnvironmentManager:
         """
         Register the subscriber ``queue`` as a consumer of the data on the devices with the names
         from the list ``device_names``. The worker is requested to start monitoring the devices
-        that are not monitored yet. The devices that the worker fails to monitor are skipped.
+        and skips the ones that are already monitored. All the requested devices are registered,
+        including the ones that the worker failed to monitor, so that monitoring is enabled for
+        them once the new environment is opened. Returns ``requested_device_names`` and
+        ``accepted_device_names``, which is the subset of the requested names accepted by
+        the worker or ``None`` if the request to the worker was not completed.
         """
         async with self._monitor_devices_lock:
-            device_names_new = [_ for _ in device_names if _ not in self._monitor_device_subscribers]
-            device_names_monitored = [_ for _ in device_names if _ in self._monitor_device_subscribers]
+            accepted_device_names = await self.device_monitor_request(device_names)
 
-            if device_names_new:
-                device_names_monitored += await self.device_monitor_request(device_names_new)
-
-            for device_name in device_names_monitored:
+            for device_name in device_names:
                 self._monitor_device_subscribers.setdefault(device_name, set()).add(queue)
 
-            return {"accepted_device_names": device_names_monitored}
+            return {
+                "requested_device_names": list(device_names),
+                "accepted_device_names": accepted_device_names,
+            }
 
     async def _unsubscribe_monitor_devices(self, queue):
         """
