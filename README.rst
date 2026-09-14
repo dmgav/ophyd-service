@@ -9,7 +9,6 @@ Starting the server::
 
     uvicorn --host localhost --port 60620 ophyd_service.server:app
 
-
 Starting the server with config file::
 
     OPHYD_SERVICE_CONFIG=config.yml uvicorn --host localhost --port 60620 ophyd_service.server:app
@@ -22,14 +21,16 @@ The API can be accessed as following::
 
     http GET http://localhost:60620/api/ping 'Authorization: ApiKey a'
 
+The API that reads a device::    
+
+    http GET http://localhost:60620/api/device/read/sim_periodic_device/sine 'Authorization: ApiKey a'
+
 Sample config file::
 
     worker_configuration:
         use_ipython_kernel: true
     authentication:
         single_user_api_key: a
-
-
 
 Running helper script for monitoring status::
 
