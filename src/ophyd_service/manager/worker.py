@@ -13,6 +13,7 @@ import time as ttime
 from multiprocessing import Process
 from threading import Thread
 
+from bluesky.run_engine import get_bluesky_event_loop, set_bluesky_event_loop
 from bluesky_queueserver.manager.comms import PipeJsonRpcReceive
 from bluesky_queueserver.manager.logging_setup import PPrintForLogging as ppfl
 from bluesky_queueserver.manager.logging_setup import setup_loggers
@@ -561,10 +562,11 @@ class RunEngineWorker(Process):
         such as reading of devices. In Python mode the main thread is blocked until the environment
         is closed, so the loop can not be run in the main thread.
         """
+        loop = self._loop
 
         def _run_loop():
-            asyncio.set_event_loop(self._loop)
-            self._loop.run_forever()
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
 
         self._loop_thread = threading.Thread(target=_run_loop, name="Worker Event Loop", daemon=True)
         self._loop_thread.start()
@@ -572,19 +574,21 @@ class RunEngineWorker(Process):
     def _stop_event_loop(self):
         """
         Stop the event loop and wait until the thread exits. The running tasks are not awaited.
+        The loop created by 'RunEngine' is owned by the startup code and is never stopped here.
         """
         if self._loop_thread is None:
             return
 
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._loop_thread.join(timeout=_LOOP_STOP_TIMEOUT)
+        thread, self._loop_thread = self._loop_thread, None
+        loop = self._loop
 
-        if self._loop_thread.is_alive():
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=_LOOP_STOP_TIMEOUT)
+
+        if thread.is_alive():
             logger.warning("The thread running the event loop failed to exit")
         else:
-            self._loop.close()
-
-        self._loop_thread = None
+            loop.close()
 
     # ------------------------------------------------------------
 
@@ -629,6 +633,9 @@ class RunEngineWorker(Process):
         asyncio.set_event_loop(self._loop)
         if not self._use_ipython_kernel:
             self._start_event_loop()
+            # 'ophyd-async' devices are connected and subscribed in the Bluesky event loop, which
+            #   is created by 'RunEngine'. The worker loop is used if the startup code creates none.
+            set_bluesky_event_loop(self._loop)
 
     def _worker_startup_code(self):
         """
@@ -649,6 +656,14 @@ class RunEngineWorker(Process):
                     startup_script_path=startup_script_path,
                     nspace=self._re_namespace,
                 )
+
+            # 'RunEngine' created in the startup code runs its own loop and registers it as
+            #   the Bluesky event loop. The devices are connected in that loop, so the worker loop
+            #   is no longer needed and the operations on the devices are executed in the new loop.
+            bluesky_loop = get_bluesky_event_loop()
+            if (bluesky_loop is not None) and (bluesky_loop is not self._loop):
+                self._stop_event_loop()
+                self._loop = bluesky_loop
 
             # if "RE" not in self._re_namespace:
             #     raise RuntimeError("Run Engine is not created in the startup code.")

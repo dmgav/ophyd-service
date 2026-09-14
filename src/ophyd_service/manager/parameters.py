@@ -10,6 +10,9 @@ from importlib.util import find_spec
 from ..config_schemas.loading import ConfigError
 from .worker_utils import get_default_startup_dir, get_default_startup_profile
 
+default_existing_pd_fln = "existing_plans_and_devices.yaml"
+default_user_group_pd_fln = "user_group_permissions.yaml"
+
 
 def get_profile_name_from_path(startup_dir):
     """
@@ -103,7 +106,7 @@ def process_startup_options(
         # If no location of startup code was specified, then load the default
         #   simulated ipython_sim/profile_collection_sim
         if not any([startup_script, startup_module, startup_profile, ipython_dir]):
-            ipython_dir = os.path.join(tempfile.gettempdir(), f"qserver_{getpass.getuser()}", "ipython")
+            ipython_dir = os.path.join(tempfile.gettempdir(), f"ophyd_service_{getpass.getuser()}", "ipython")
             startup_profile = default_startup_profile
             demo_mode = True
 
@@ -162,6 +165,23 @@ def adjust_startup_options(worker_config):
         )
     )
 
+    existing_plans_and_devices_path = worker_config["existing_plans_and_devices_path"]
+    if not existing_plans_and_devices_path:
+        existing_plans_and_devices_path = aux_dir
+    if not existing_plans_and_devices_path.endswith(".yaml"):
+        existing_plans_and_devices_path = os.path.join(existing_plans_and_devices_path, default_existing_pd_fln)
+    worker_config["existing_plans_and_devices_path"] = existing_plans_and_devices_path
+
+    user_group_permissions_path = worker_config["user_group_permissions_path"]
+    if not user_group_permissions_path:
+        user_group_permissions_path = aux_dir
+    if not user_group_permissions_path.endswith(".yaml"):
+        user_group_permissions_path = os.path.join(user_group_permissions_path, default_user_group_pd_fln)
+    worker_config["user_group_permissions_path"] = user_group_permissions_path
+
+    print(f"===================== {startup_dir=}")  ##
+    print(f"===================== {aux_dir=}")  ##
+    print(f"===================== {demo_mode=}")  ##
     worker_config.update(
         {
             "startup_dir": startup_dir,

@@ -2,6 +2,8 @@ import importlib
 import logging
 import os
 import re
+import shutil
+import tempfile
 from datetime import datetime
 
 from bluesky_queueserver.manager.profile_ops import _split_name_pattern
@@ -31,6 +33,24 @@ def get_default_startup_profile():
     The startup code is expected to be in ``/tmp/ophyd_service/ipython/profile_collection_sim/startup`` directory.
     """
     return "collection_sim"
+
+
+def create_demo_ipython_profile(startup_dir, *, delete_existing=True):
+    """
+    Create demo IPython profile in temporary location. Copy startup directory
+    to the new profile. Raises OSError if the destination directory is not temporary.
+    """
+    tempdir = tempfile.gettempdir()
+    if os.path.commonprefix([tempdir, startup_dir]) != tempdir:
+        raise OSError("Attempting to create a demo profile in non-temporary startup directory: %r", startup_dir)
+
+    # Delete the existing startup directory (but not the whole profile).
+    if delete_existing:
+        shutil.rmtree(startup_dir, ignore_errors=True)
+
+    # Copy the startup files
+    default_startup_dir = get_default_startup_dir()
+    shutil.copytree(default_startup_dir, startup_dir)
 
 
 def _device_name_matches_pattern(device_name, pattern):

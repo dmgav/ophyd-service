@@ -19,9 +19,9 @@ from bluesky_queueserver.manager.comms import PipeJsonRpcSendAsync
 from bluesky_queueserver.manager.profile_ops import load_user_group_permissions
 
 from .. import __version__
-from .parameters import adjust_startup_options
+from .parameters import adjust_startup_options, profile_name_to_startup_dir
 from .worker import RunEngineWorker
-from .worker_utils import device_name_is_allowed, get_timestamp_iso8601
+from .worker_utils import create_demo_ipython_profile, device_name_is_allowed, get_timestamp_iso8601
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,8 @@ def default_worker_config():
         "startup_profile": None,
         "ipython_dir": None,
         "ipython_matplotlib": None,
-        "user_group_permissions_path": "user_group_permissions.yaml",
+        # "user_group_permissions_path": "user_group_permissions.yaml",
+        "user_group_permissions_path": None,
         "existing_plans_and_devices_path": None,
         "update_existing_plans_devices": "NEVER",
         "ignore_invalid_plans": False,
@@ -121,6 +122,7 @@ class EnvironmentManager:
         self._worker_config = default_worker_config()
         self._worker_config.update(worker_config or {})
         adjust_startup_options(self._worker_config)
+        self.create_demo_profile()
 
         self._close_timeout = close_timeout
         self._log_level = log_level
@@ -183,6 +185,26 @@ class EnvironmentManager:
     @property
     def is_running(self):
         return (self._process is not None) and self._process.is_alive()
+
+    def create_demo_profile(self):
+        """
+        Create the temporary IPython profile with the simulated startup files. The profile is
+        created only in demo mode with the IPython-based worker. Called after the startup options
+        are processed by ``adjust_startup_options()``.
+        """
+        config = self._worker_config
+        if not (config.get("demo_mode") and config.get("use_ipython_kernel")):
+            return
+
+        try:
+            sdir = config.get("startup_dir") or profile_name_to_startup_dir(
+                config.get("startup_profile"), config.get("ipython_dir")
+            )
+            print("============== sdir=")  ##
+            create_demo_ipython_profile(sdir)
+            logger.info("Temporary IPython profile was created (%r)", sdir)
+        except Exception as ex:
+            logger.exception("Failed to create the temporary IPython profile: %s", ex)
 
     def get_status(self):
         """
