@@ -435,7 +435,7 @@ class RunEngineWorker(Process):
 
                     if _device_is_ophyd_async(device):
                         # An 'ophyd-async' device may be subscribed only from the thread that runs
-                        #   the event loop, and 'unsubscribe' accepts the callback instead of a CID.
+                        #   the event loop, and 'clear_sub' accepts the callback instead of a CID.
                         callback = self._create_monitor_callback_async(device_name)
                         future = asyncio.run_coroutine_threadsafe(
                             self._device_subscribe_async(device, callback), self._loop
@@ -500,7 +500,7 @@ class RunEngineWorker(Process):
         """
         Unsubscribe from the 'ophyd-async' device. Executed in the thread that runs the worker loop.
         """
-        device.unsubscribe(callback)
+        device.clear_sub(callback)
 
     def _command_device_unmonitor_handler(self, device_names):
         """
