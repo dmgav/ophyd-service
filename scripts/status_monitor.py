@@ -3,12 +3,13 @@
 Subscribe to the '/api/status' websocket of ophyd-service and print the status messages.
 
 Usage:
-    python status_monitor.py [--url ws://localhost:8000/api/status] [--json]
+    python status_monitor.py [--url ws://localhost:8000/api/status/ws] [--json]
 
 
 pixi run python status_monitor.py
 pixi run python status_monitor.py --json
-pixi run python status_monitor.py --url ws://some-host:8000/api/status
+pixi run python status_monitor.py --url ws://some-host:8000/api/status/ws
+pixi run python status_monitor.py --api-key <api-key>
 """
 
 import argparse
@@ -31,10 +32,12 @@ def format_status(status):
     )
 
 
-async def monitor(url, as_json):
+async def monitor(url, as_json, api_key):
+    # The key is passed in the header, so that it is not exposed in the URL.
+    headers = {"Authorization": f"ApiKey {api_key}"} if api_key else {}
     while True:
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, additional_headers=headers) as ws:
                 print(f"Connected to {url}")
                 async for message in ws:
                     status = json.loads(message).get("status", {})
@@ -51,14 +54,19 @@ async def monitor(url, as_json):
 
 def main():
     parser = argparse.ArgumentParser(description="Monitor the status stream of ophyd-service.")
-    parser.add_argument("--url", default="ws://localhost:60620/api/status", help="Websocket URL.")
+    parser.add_argument("--url", default="ws://localhost:60620/api/status/ws", help="Websocket URL.")
     parser.add_argument(
         "--json", action="store_true", default=True, help="Print the full status as formatted JSON."
+    )
+    parser.add_argument(
+        "--api-key",
+        default="",
+        help="API key used to authenticate.",
     )
     args = parser.parse_args()
 
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(monitor(args.url, args.json))
+        asyncio.run(monitor(args.url, args.json, args.api_key))
 
 
 if __name__ == "__main__":

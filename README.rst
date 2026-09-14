@@ -41,11 +41,11 @@ The API that reads a device::
 
 Running helper script for monitoring status::
 
-    python status_monitor.py
+    python status_monitor.py --api-key a
 
 Running helper script for monitoring devices (devices are available in the demo profile)::
 
-    python stream_monitor.py --devices sim_periodic_device.noise sim_periodic_device.sine
-    python stream_monitor.py --devices rand_async_device2.value
-    python stream_monitor.py --devices rand_async_device1.value rand_async_device2.value
+    python stream_monitor.py --api-key a --devices sim_periodic_device.noise sim_periodic_device.sine
+    python stream_monitor.py --api-key a --devices rand_async_device2.value
+    python stream_monitor.py --api-key a --devices rand_async_device1.value rand_async_device2.value
 

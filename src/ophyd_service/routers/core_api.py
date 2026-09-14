@@ -16,7 +16,11 @@ if version.parse(pydantic.__version__) < version.parse("2.0.0"):
 else:
     from pydantic_settings import BaseSettings
 
-from ..authentication import get_current_principal
+from ..authentication import (
+    authenticate_websocket_first_message,
+    get_current_principal,
+    get_current_principal_websocket,
+)
 from ..resources import SERVER_RESOURCES as SR
 
 # if version.parse(pydantic.__version__) < version.parse("2.0.0"):
@@ -83,13 +87,103 @@ async def environment_close_handler(principal=Security(get_current_principal, sc
     return {"success": success, "msg": msg}
 
 
-@router.websocket("/status")
-async def status_websocket_handler(websocket: WebSocket):
+# @router.websocket("/status/ws")
+# async def status_ws(websocket: WebSocket, scopes=["read:monitor"]):
+#     principal, accepted = await _authenticate_websocket(websocket, scopes)
+#     if not principal:
+#         return
+
+#     if not accepted:
+#         await websocket.accept()
+#     q = SR.system_info_stream.add_queue_status(websocket)
+#     wsmon = WebSocketMonitor(websocket)
+#     wsmon.start()
+
+#     try:
+#         while wsmon.is_alive:
+#             try:
+#                 msg = await asyncio.wait_for(q.get(), timeout=1)
+#                 await websocket.send_text(msg)
+#             except asyncio.TimeoutError:
+#                 pass
+#             except RuntimeError:  # 'send' after the client is disconnected
+#                 pass
+#     except WebSocketDisconnect:
+#         pass
+#     finally:
+#         SR.system_info_stream.remove_queue_status(websocket)
+
+
+# WebSocket close codes.  4001 = invalid token, 4401 = auth required
+# (RFC 6455 leaves 4000-4999 for application use).
+_WS_CLOSE_INVALID_TOKEN = 4001
+_WS_CLOSE_AUTH_REQUIRED = 4401
+
+
+async def _authenticate_websocket(websocket, scopes):
+    """Resolve a Principal for a WebSocket connection.
+
+    Tries in order:
+
+    1. ``Authorization: Bearer|ApiKey ...`` header (populated by curl/CLI).
+    2. ``?access_token=...`` or ``?api_key=...`` query parameter (populated
+       by browsers, which cannot set request headers on a WebSocket
+       handshake).
+    3. First-message handshake: accepts the socket, then reads one JSON
+       message of the form
+       ``{"type": "auth", "api_key": "..."}`` or
+       ``{"type": "auth", "access_token": "..."}``.
+       On success the socket stays open; on failure the socket is closed
+       with code 4001 and ``None`` is returned.
+
+    Returns ``(principal, accepted)`` where ``accepted`` indicates whether
+    the socket has already been ``.accept()``-ed by this helper (True only
+    when the first-message path was used).  Callers that receive ``None``
+    for the principal have already had the socket closed and should return
+    immediately.
+    """
+    principal = get_current_principal_websocket(websocket=websocket, scopes=scopes)
+    if principal is not None:
+        return principal, False
+
+    # Fall back to the first-message handshake.  Accept the socket so that we
+    # can receive the auth payload; the client is expected to send it as the
+    # very first frame.
+    await websocket.accept()
+    try:
+        message = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+    except asyncio.TimeoutError:
+        await websocket.close(code=_WS_CLOSE_AUTH_REQUIRED, reason="Auth required")
+        return None, True
+    except WebSocketDisconnect:
+        # Client already gone — no close frame needed.
+        return None, True
+    except Exception:
+        logger.exception("Unexpected error receiving WebSocket auth frame")
+        await websocket.close(code=_WS_CLOSE_AUTH_REQUIRED, reason="Auth required")
+        return None, True
+
+    principal = authenticate_websocket_first_message(websocket, message)
+    if principal is None:
+        await websocket.close(code=_WS_CLOSE_INVALID_TOKEN, reason="Invalid token")
+        return None, True
+
+    return principal, True
+
+
+@router.websocket("/status/ws")
+async def status_websocket_handler(websocket: WebSocket, scopes=["read:monitor"]):
     """
     Stream the status messages published by the environment manager. Only the messages
     published while the connection is open are sent to the client.
     """
-    await websocket.accept()
+
+    principal, accepted = await _authenticate_websocket(websocket, scopes)
+    if not principal:
+        return
+
+    if not accepted:
+        await websocket.accept()
     with SR.environment_manager.subscribe_status() as queue:
         try:
             while True:
@@ -101,8 +195,8 @@ async def status_websocket_handler(websocket: WebSocket):
             logger.debug("The status websocket was closed: %s", ex)
 
 
-@router.websocket("/monitor")
-async def monitor_websocket_handler(websocket: WebSocket):
+@router.websocket("/monitor/ws")
+async def monitor_websocket_handler(websocket: WebSocket, scopes=["read:monitor"]):
     """
     Stream the data on the monitored PVs published by the environment manager. Only the messages
     published while the connection is open are sent to the client. The client may send JSON
@@ -143,7 +237,12 @@ async def monitor_websocket_handler(websocket: WebSocket):
                     }
                 )
 
-    await websocket.accept()
+    principal, accepted = await _authenticate_websocket(websocket, scopes)
+    if not principal:
+        return
+
+    if not accepted:
+        await websocket.accept()
     async with SR.environment_manager.subscribe_monitor() as queue:
         tasks = [
             asyncio.ensure_future(send_monitor_data(queue)),
