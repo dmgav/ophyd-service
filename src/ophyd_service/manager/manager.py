@@ -148,6 +148,11 @@ class EnvironmentManager:
         self._status_subscribers = set()
         self._monitor_subscribers = set()
 
+        # Device name -> set of subscriber queues that requested monitoring of the device.
+        self._monitor_device_subscribers = {}
+        # Serializes the updates of the dictionary and the related requests to the worker.
+        self._monitor_devices_lock = asyncio.Lock()
+
         # Pending calls to the worker: 'req_uid' -> set
         self._pending_calls = {}
 
@@ -191,6 +196,7 @@ class EnvironmentManager:
             "worker_environment_exists": self._env_state == EnvState.OPEN,
             "worker_environment_state": worker_state.get("environment_state", None),
             "status_uid": _generate_uid(),  # New UID each time status is updated
+            "monitored_devices": len(self._monitor_device_subscribers),
             "devices_existing_uid": None,
             "devices_allowed_uid": None,
         }
@@ -298,6 +304,10 @@ class EnvironmentManager:
             if success:
                 self._env_state = EnvState.OPEN
                 logger.info("RE Worker environment was opened successfully")
+                async with self._monitor_devices_lock:
+                    if self._monitor_device_subscribers:
+                        # The new worker knows nothing about the existing subscriptions.
+                        await self.device_monitor_request(list(self._monitor_device_subscribers))
             else:
                 logger.error("Failed to open RE Worker environment: %s", err_msg)
                 await self._destroy_worker()
@@ -465,6 +475,35 @@ class EnvironmentManager:
             self._pending_calls.pop(req_uid, None)
 
         return success, err_msg, value, req_uid
+
+    async def device_monitor_request(self, device_names):
+        """
+        Request the worker to monitor the devices with the names from the list ``device_names``.
+        Returns the names of the devices for which monitoring was enabled. The list is empty
+        if the request failed.
+        """
+        try:
+            if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
+                raise RuntimeError("RE Worker environment does not exist.")
+
+            response = await self._comm_to_worker.send_msg("device_monitor", {"device_names": device_names})
+            return response.get("monitored_device_names", [])
+        except Exception as ex:
+            logger.error("Failed to send the request to monitor the devices %s: %s", device_names, ex)
+            return []
+
+    async def device_unmonitor_request(self, device_names):
+        """
+        Request the worker to stop monitoring the devices with the names from the list
+        ``device_names``. The response from the worker is ignored.
+        """
+        try:
+            if (self._env_state != EnvState.OPEN) or (self._comm_to_worker is None):
+                raise RuntimeError("RE Worker environment does not exist.")
+
+            await self._comm_to_worker.send_msg("device_unmonitor", {"device_names": device_names})
+        except Exception as ex:
+            logger.error("Failed to send the request to stop monitoring the devices %s: %s", device_names, ex)
 
     # ------------------------------------------------------------
     #                      Device queue monitor
@@ -685,8 +724,8 @@ class EnvironmentManager:
     # ------------------------------------------------------------
     #                        Monitored data
 
-    @contextlib.contextmanager
-    def subscribe_monitor(self):
+    @contextlib.asynccontextmanager
+    async def subscribe_monitor(self):
         """
         Context manager that yields a queue receiving the data on the monitored PVs published
         while the subscription is active. Each subscriber gets its own queue and its own copy
@@ -698,13 +737,53 @@ class EnvironmentManager:
             yield queue
         finally:
             self._monitor_subscribers.discard(queue)
+            await self._unsubscribe_monitor_devices(queue)
+
+    async def subscribe_monitor_devices(self, device_names, queue):
+        """
+        Register the subscriber ``queue`` as a consumer of the data on the devices with the names
+        from the list ``device_names``. The worker is requested to start monitoring the devices
+        that are not monitored yet. The devices that the worker fails to monitor are skipped.
+        """
+        async with self._monitor_devices_lock:
+            device_names_new = [_ for _ in device_names if _ not in self._monitor_device_subscribers]
+            device_names_monitored = [_ for _ in device_names if _ in self._monitor_device_subscribers]
+
+            if device_names_new:
+                device_names_monitored += await self.device_monitor_request(device_names_new)
+
+            for device_name in device_names_monitored:
+                self._monitor_device_subscribers.setdefault(device_name, set()).add(queue)
+
+            return {"accepted_device_names": device_names_monitored}
+
+    async def _unsubscribe_monitor_devices(self, queue):
+        """
+        Remove the subscriber ``queue`` from the sets of subscribers for all the devices. The worker
+        is requested to stop monitoring the devices that have no subscribers left.
+        """
+        device_names_removed = []
+        async with self._monitor_devices_lock:
+            for device_name in list(self._monitor_device_subscribers):
+                subscribers = self._monitor_device_subscribers[device_name]
+                subscribers.discard(queue)
+                if not subscribers:
+                    del self._monitor_device_subscribers[device_name]
+                    device_names_removed.append(device_name)
+
+            if device_names_removed:
+                await self.device_unmonitor_request(device_names_removed)
 
     def _publish_monitor(self, msg):
-        for queue in self._monitor_subscribers:
-            if queue.full():
-                # The subscriber is not reading the messages fast enough: drop the oldest one.
-                queue.get_nowait()
-            queue.put_nowait(msg)
+        if "heartbeat" in msg:
+            for queue in self._monitor_subscribers:
+                if not queue.full():
+                    queue.put_nowait(msg)
+        elif "monitor_data" in msg:
+            device_name = msg["monitor_data"].get("name")
+            for queue in self._monitor_device_subscribers.get(device_name, ()):
+                if not queue.full():
+                    queue.put_nowait(msg)
 
     # ------------------------------------------------------------
 

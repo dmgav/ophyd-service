@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 
 import pydantic
@@ -103,15 +105,55 @@ async def status_websocket_handler(websocket: WebSocket):
 async def monitor_websocket_handler(websocket: WebSocket):
     """
     Stream the data on the monitored PVs published by the environment manager. Only the messages
-    published while the connection is open are sent to the client.
+    published while the connection is open are sent to the client. The client may send JSON
+    messages to the server over the same connection.
     """
+
+    send_lock = asyncio.Lock()
+
+    async def send_monitor_data(queue):
+        while True:
+            msg = await queue.get()
+            async with send_lock:
+                await websocket.send_json(msg)
+
+    async def receive_client_messages(queue):
+        while True:
+            try:
+                msg = await websocket.receive_json()
+            except json.JSONDecodeError:
+                logger.error("The message received from a monitor websocket client is not valid JSON.")
+                continue
+            if not isinstance(msg, dict):
+                logger.error("The message received from a monitor websocket client is not a JSON object.")
+                continue
+
+            device_names = msg.get("monitor_devices")
+            if not isinstance(device_names, list) or not all(isinstance(_, str) for _ in device_names):
+                logger.error("Invalid request received from a monitor websocket client: %s", msg)
+                continue
+
+            logger.debug("Message received from a monitor websocket client: %s", msg)
+            result = await SR.environment_manager.subscribe_monitor_devices(device_names, queue)
+            accepted_devices = result["accepted_device_names"]
+            async with send_lock:
+                await websocket.send_json({"accepted_devices": accepted_devices})
+
     await websocket.accept()
-    with SR.environment_manager.subscribe_monitor() as queue:
+    async with SR.environment_manager.subscribe_monitor() as queue:
+        tasks = [
+            asyncio.ensure_future(send_monitor_data(queue)),
+            asyncio.ensure_future(receive_client_messages(queue)),
+        ]
         try:
-            while True:
-                await websocket.send_json(await queue.get())
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()  # Reraise the exception that stopped the handler.
         except WebSocketDisconnect:
             logger.debug("The client disconnected from the monitor websocket.")
         except RuntimeError as ex:
-            # Raised if the connection is closed while the message is sent.
+            # Raised if the connection is closed while the message is sent or received.
             logger.debug("The monitor websocket was closed: %s", ex)

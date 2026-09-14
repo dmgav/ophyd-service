@@ -51,6 +51,18 @@ _device_name_pattern = re.compile(r"[_a-zA-Z][_a-zA-Z0-9]*(\.[_a-zA-Z][_a-zA-Z0-
 # Maximum time to wait for the thread running the event loop to exit.
 _LOOP_STOP_TIMEOUT = 5.0
 
+# Maximum time to wait for an 'ophyd-async' device to subscribe or unsubscribe.
+_DEVICE_SUBSCRIBE_TIMEOUT = 10.0
+
+
+def _device_is_ophyd_async(device):
+    """
+    Check if ``device`` is an 'ophyd-async' device or signal. The device is considered
+    asynchronous if it has the ``read()`` method and the method is a coroutine function.
+    """
+    # TODO: there should be better way to check for this
+    return hasattr(device, "read") and inspect.iscoroutinefunction(device.read)
+
 
 class RunEngineWorker(Process):
     """
@@ -144,6 +156,9 @@ class RunEngineWorker(Process):
         self._loop_thread = None  # Thread that runs the event loop
 
         self._re_namespace, self._devices_in_nspace = {}, {}
+
+        # Monitored devices: device name -> cid of the subscription.
+        self._monitored_devices = {}
 
         self._worker_shutdown_initiated = False  # Indicates if shutdown is initiated by request
         self._unexpected_shutdown = False  # Indicates if shutdown is in progress, but it was not requested
@@ -318,7 +333,7 @@ class RunEngineWorker(Process):
 
         return {"status": status, "err_msg": err_msg}
 
-    def _device_read_handler(self, device_name, req_uid):
+    def _command_device_read_handler(self, device_name, req_uid):
         """
         Read the device with the name ``device_name``. The name may refer to a subdevice,
         e.g. 'sim_stage.det'. ``req_uid`` is the UID of the request, which is used to
@@ -386,6 +401,148 @@ class RunEngineWorker(Process):
             msg = {"req_uid": req_uid, "success": False, "err_msg": f"Error: {ex}", "result": None}
 
         self._device_queue.put(msg)
+
+    def _command_device_monitor_handler(self, device_names):
+        """
+        Start monitoring the devices with the names from the list ``device_names``. The names
+        may refer to subdevices, e.g. 'sim_stage.det'. The devices that do not exist, do not
+        support subscriptions or are already monitored are skipped. Returns the names of the
+        devices for which monitoring was enabled as ``monitored_device_names``.
+        """
+        monitored_device_names = []
+        try:
+            if not isinstance(device_names, (list, tuple)):
+                raise TypeError(f"Invalid list of device names: {device_names!r}")
+
+            for device_name in device_names:
+                try:
+                    if device_name in self._monitored_devices:
+                        continue
+
+                    # The name is evaluated, so only dotted identifiers are accepted.
+                    if not isinstance(device_name, str) or not _device_name_pattern.fullmatch(device_name):
+                        raise ValueError(f"Invalid device name: {device_name!r}")
+
+                    nspace = self._re_namespace
+                    try:
+                        device = eval(device_name, nspace, nspace)  # noqa: S307
+                    except Exception as ex:
+                        raise RuntimeError(f"Device is not found in the namespace: {ex}") from ex
+
+                    if not hasattr(device, "subscribe"):
+                        raise RuntimeError("The device has no attribute 'subscribe'")
+
+                    if _device_is_ophyd_async(device):
+                        # An 'ophyd-async' device may be subscribed only from the thread that runs
+                        #   the event loop, and 'unsubscribe' accepts the callback instead of a CID.
+                        callback = self._create_monitor_callback_async(device_name)
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._device_subscribe_async(device, callback), self._loop
+                        )
+                        future.result(timeout=_DEVICE_SUBSCRIBE_TIMEOUT)
+                        cid = callback
+                    else:
+                        callback = self._create_monitor_callback(device_name)
+                        cid = device.subscribe(callback)
+
+                    self._monitored_devices[device_name] = cid
+                    monitored_device_names.append(device_name)
+                    logger.info("Started monitoring the device '%s'", device_name)
+
+                except Exception as ex:
+                    logger.warning("Failed to start monitoring the device '%s': %s", device_name, ex)
+
+            status, err_msg = "accepted", ""
+        except Exception as ex:
+            status, err_msg = "rejected", f"Error: {ex}"
+
+        return {"status": status, "err_msg": err_msg, "monitored_device_names": monitored_device_names}
+
+    def _create_monitor_callback(self, device_name):
+        """
+        Create the callback that pushes the data on the device ``device_name`` to the stream queue.
+        The callback is called by the monitored object, typically from a separate thread.
+        """
+
+        def monitor_callback(value, old_value, timestamp, **kwargs):
+            msg = {"monitor_data": {"name": device_name, "value": value, "timestamp": timestamp}}
+            self._stream_queue.put(msg)
+
+        return monitor_callback
+
+    def _create_monitor_callback_async(self, device_name):
+        """
+        Create the callback that pushes the data on the 'ophyd-async' device ``device_name``
+        to the stream queue. The callback is called with the dictionary of readings.
+        """
+
+        def monitor_callback(readings):
+            for reading in readings.values():
+                msg = {
+                    "monitor_data": {
+                        "name": device_name,
+                        "value": reading["value"],
+                        "timestamp": reading["timestamp"],
+                    }
+                }
+                self._stream_queue.put(msg)
+
+        return monitor_callback
+
+    async def _device_subscribe_async(self, device, callback):
+        """
+        Subscribe to the 'ophyd-async' device. Executed in the thread that runs the worker loop.
+        """
+        device.subscribe(callback)
+
+    async def _device_unsubscribe_async(self, device, callback):
+        """
+        Unsubscribe from the 'ophyd-async' device. Executed in the thread that runs the worker loop.
+        """
+        device.unsubscribe(callback)
+
+    def _command_device_unmonitor_handler(self, device_names):
+        """
+        Stop monitoring the devices with the names from the list ``device_names``. The names
+        may refer to subdevices, e.g. 'sim_stage.det'. The devices that are not monitored
+        are skipped.
+        """
+        try:
+            if not isinstance(device_names, (list, tuple)):
+                raise TypeError(f"Invalid list of device names: {device_names!r}")
+
+            for device_name in device_names:
+                try:
+                    if device_name not in self._monitored_devices:
+                        continue
+
+                    # The entry is removed even if the device fails to unsubscribe.
+                    cid = self._monitored_devices.pop(device_name)
+
+                    nspace = self._re_namespace
+                    try:
+                        device = eval(device_name, nspace, nspace)  # noqa: S307
+                    except Exception as ex:
+                        raise RuntimeError(f"Device is not found in the namespace: {ex}") from ex
+
+                    if _device_is_ophyd_async(device):
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._device_unsubscribe_async(device, cid), self._loop
+                        )
+                        future.result(timeout=_DEVICE_SUBSCRIBE_TIMEOUT)
+                    else:
+                        device.unsubscribe(cid)
+
+                    logger.info("Stopped monitoring the device '%s'", device_name)
+
+                except Exception as ex:
+                    logger.warning("Failed to stop monitoring the device '%s': %s", device_name, ex)
+
+            status, err_msg = "accepted", ""
+        except Exception as ex:
+            status, err_msg = "rejected", f"Error: {ex}"
+
+        return {"status": status, "err_msg": err_msg}
 
     # ------------------------------------------------------------
 
@@ -456,7 +613,9 @@ class RunEngineWorker(Process):
         self._comm_to_manager.add_method(self._command_confirm_exit_handler, "command_confirm_exit")
         self._comm_to_manager.add_method(self._command_permissions_reload_handler, "command_permissions_reload")
         self._comm_to_manager.add_method(self._command_interrupt_kernel_handler, "command_interrupt_kernel")
-        self._comm_to_manager.add_method(self._device_read_handler, "device_read")
+        self._comm_to_manager.add_method(self._command_device_read_handler, "device_read")
+        self._comm_to_manager.add_method(self._command_device_monitor_handler, "device_monitor")
+        self._comm_to_manager.add_method(self._command_device_unmonitor_handler, "device_unmonitor")
 
         self._comm_to_manager.start()
 

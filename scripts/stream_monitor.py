@@ -3,12 +3,13 @@
 Subscribe to the '/api/monitor' websocket of ophyd-service and print the streamed messages.
 
 Usage:
-    python stream_monitor.py [--url ws://localhost:60620/api/monitor] [--json]
+    python stream_monitor.py [--url ws://localhost:60620/api/monitor] [--json] [--devices NAME ...]
 
 
 pixi run python stream_monitor.py
 pixi run python stream_monitor.py --json
 pixi run python stream_monitor.py --url ws://some-host:8000/api/monitor
+pixi run python stream_monitor.py --devices det1 motor1 motor2
 """
 
 import argparse
@@ -27,11 +28,14 @@ def format_msg(msg):
     return json.dumps(msg)
 
 
-async def monitor(url, as_json):
+async def monitor(url, as_json, device_names):
     while True:
         try:
             async with websockets.connect(url) as ws:
                 print(f"Connected to {url}")
+                if device_names:
+                    print(f"Requesting to monitor the devices: {device_names} ...")
+                    await ws.send(json.dumps({"monitor_devices": device_names}))
                 async for message in ws:
                     msg = json.loads(message)
                     if as_json:
@@ -51,10 +55,13 @@ def main():
     parser.add_argument(
         "--json", action="store_true", default=True, help="Print the full message as formatted JSON."
     )
+    parser.add_argument(
+        "--devices", nargs="*", default=[], metavar="NAME", help="Names of the devices to monitor."
+    )
     args = parser.parse_args()
 
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(monitor(args.url, args.json))
+        asyncio.run(monitor(args.url, args.json, args.devices))
 
 
 if __name__ == "__main__":
