@@ -1,6 +1,8 @@
 import asyncio
+import contextlib
 import json
 import logging
+from datetime import datetime
 
 import pydantic
 from fastapi import APIRouter, Depends, Security, WebSocket, WebSocketDisconnect
@@ -21,7 +23,7 @@ from ..authentication import (
     get_current_principal,
     get_current_principal_websocket,
 )
-from ..resources import SERVER_RESOURCES as SR
+from ..resources import SERVER_RESOURCES as SR  # noqa: F401
 
 # if version.parse(pydantic.__version__) < version.parse("2.0.0"):
 #     from pydantic import BaseSettings
@@ -63,55 +65,13 @@ async def device_read_handler(
     ]
     user_group = resource_access_manager.get_resource_group(username)
     device_name = device_name.replace("/", ".")
-    # logger.debug("User group: %s  Device name: %s", user_group, device_name)
-    success, msg, value, req_uid = await SR.environment_manager.device_read(device_name, user_group=user_group)
-    return {"success": success, "msg": msg, "device_name": device_name, "value": value}
-
-
-@router.post("/environment/open")
-async def environment_open_handler(principal=Security(get_current_principal, scopes=["write:manager:control"])):
-    """
-    Open the RE Worker environment: start the worker process and load the startup code.
-    """
-    success, msg = await SR.environment_manager.open_environment()
-    return {"success": success, "msg": msg}
-
-
-@router.post("/environment/close")
-async def environment_close_handler(principal=Security(get_current_principal, scopes=["write:manager:control"])):
-    """
-    Close the RE Worker environment. The worker process is killed if it fails to exit
-    in an orderly way before the timeout expires.
-    """
-    success, msg = await SR.environment_manager.close_environment()
-    return {"success": success, "msg": msg}
-
-
-# @router.websocket("/status/ws")
-# async def status_ws(websocket: WebSocket, scopes=["read:monitor"]):
-#     principal, accepted = await _authenticate_websocket(websocket, scopes)
-#     if not principal:
-#         return
-
-#     if not accepted:
-#         await websocket.accept()
-#     q = SR.system_info_stream.add_queue_status(websocket)
-#     wsmon = WebSocketMonitor(websocket)
-#     wsmon.start()
-
-#     try:
-#         while wsmon.is_alive:
-#             try:
-#                 msg = await asyncio.wait_for(q.get(), timeout=1)
-#                 await websocket.send_text(msg)
-#             except asyncio.TimeoutError:
-#                 pass
-#             except RuntimeError:  # 'send' after the client is disconnected
-#                 pass
-#     except WebSocketDisconnect:
-#         pass
-#     finally:
-#         SR.system_info_stream.remove_queue_status(websocket)
+    logger.info(
+        "Device read requested by user '%s' in resource group '%s' for device '%s'.",
+        username,
+        user_group,
+        device_name,
+    )
+    return {"success": True, "msg": "", "device_name": device_name, "value": {}}
 
 
 # WebSocket close codes.  4001 = invalid token, 4401 = auth required
@@ -171,28 +131,40 @@ async def _authenticate_websocket(websocket, scopes):
     return principal, True
 
 
-@router.websocket("/status/ws")
-async def status_websocket_handler(websocket: WebSocket, scopes=["read:monitor"]):
+def get_timestamp_iso8601():
     """
-    Stream the status messages published by the environment manager. Only the messages
-    published while the connection is open are sent to the client.
+    Returns current timestamp in ISO 8601 format.
     """
+    return datetime.now().isoformat()
 
-    principal, accepted = await _authenticate_websocket(websocket, scopes)
-    if not principal:
-        return
 
-    if not accepted:
-        await websocket.accept()
-    with SR.environment_manager.subscribe_status() as queue:
+class HeartbeatMessageStream:
+    def __init__(self, period=1.0):
+        self._period = period
+
+    @contextlib.asynccontextmanager
+    async def subscribe(self):
+        queue = asyncio.Queue()
+        task = asyncio.create_task(self._publish_heartbeats(queue))
         try:
-            while True:
-                await websocket.send_json(await queue.get())
-        except WebSocketDisconnect:
-            logger.debug("The client disconnected from the status websocket.")
-        except RuntimeError as ex:
-            # Raised if the connection is closed while the message is sent.
-            logger.debug("The status websocket was closed: %s", ex)
+            yield queue
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _publish_heartbeats(self, queue):
+        while True:
+            await queue.put(
+                {
+                    "heartbeat": {
+                        "timestamp": get_timestamp_iso8601(),
+                    }
+                }
+            )
+            await asyncio.sleep(self._period)
+
+
+heartbeat_message_stream = HeartbeatMessageStream()
 
 
 @router.websocket("/monitor/ws")
@@ -211,7 +183,7 @@ async def monitor_websocket_handler(websocket: WebSocket, scopes=["read:monitor"
             async with send_lock:
                 await websocket.send_json(msg)
 
-    async def receive_client_messages(queue):
+    async def receive_client_messages():
         while True:
             try:
                 msg = await websocket.receive_json()
@@ -227,13 +199,12 @@ async def monitor_websocket_handler(websocket: WebSocket, scopes=["read:monitor"
                 logger.error("Invalid request received from a monitor websocket client: %s", msg)
                 continue
 
-            logger.debug("Message received from a monitor websocket client: %s", msg)
-            result = await SR.environment_manager.subscribe_monitor_devices(device_names, queue)
+            logger.info("Message received from a monitor websocket client: %s", msg)
             async with send_lock:
                 await websocket.send_json(
                     {
-                        "requested_devices": result["requested_device_names"],
-                        "accepted_devices": result["accepted_device_names"],
+                        "requested_devices": [],
+                        "accepted_devices": [],
                     }
                 )
 
@@ -243,10 +214,10 @@ async def monitor_websocket_handler(websocket: WebSocket, scopes=["read:monitor"
 
     if not accepted:
         await websocket.accept()
-    async with SR.environment_manager.subscribe_monitor() as queue:
+    async with heartbeat_message_stream.subscribe() as queue:
         tasks = [
             asyncio.ensure_future(send_monitor_data(queue)),
-            asyncio.ensure_future(receive_client_messages(queue)),
+            asyncio.ensure_future(receive_client_messages()),
         ]
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

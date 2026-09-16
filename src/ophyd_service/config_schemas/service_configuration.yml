@@ -14,44 +14,14 @@ $schema": http://json-schema.org/draft-07/schema#
 type: object
 additionalProperties: false
 properties:
-  worker_configuration:
+  ophyd_service_configuration:
     type: [object]
     additionalProperties: false
     properties:
       startup_dir:
         type: string
-      startup_module_name:
-        type: string
-      startup_script_path:
-        type: string
-      startup_profile: 
-        type: string
-      ipython_dir:
-        type: string
-      existing_plans_and_devices_path:
-        type: string
-      user_group_permissions_path:
-        type: string
-      use_ipython_kernel:
-        type: boolean
-      ipython_kernel_ip:
-        type: string
-      ipython_matplotlib:
-        type: string
-      ipython_connection_file:
-        type: string
-      ipython_connection_dir:
-        type: string
-      ipython_shell_port:
-        type: integer      
-      ipython_iopub_port:
-        type: integer      
-      ipython_stdin_port:
-        type: integer      
-      ipython_hb_port:
-        type: integer      
-      ipython_control_port:
-        type: integer      
+        description: |
+          Add necessary properties
   server_configuration:
     type: [object]
     additionalProperties: false

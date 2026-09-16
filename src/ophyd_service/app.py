@@ -16,7 +16,7 @@ from .authenticators import ProxiedOIDCAuthenticator
 from .core import PatchedStreamingResponse
 from .database.core import purge_expired
 from .protocols import ExternalAuthenticator, InternalAuthenticator
-from .resources import SERVER_RESOURCES as SR
+from .resources import SERVER_RESOURCES as SR  # noqa: F401
 from .routers import core_api
 from .settings import get_settings
 from .utils import (
@@ -274,8 +274,11 @@ def build_app(authentication=None, api_access=None, resource_access=None, server
             app.state.tasks.append(asyncio.create_task(purge_expired_sessions_and_api_keys()))
 
         # server_config = (server_settings or {}).get("server_configuration", {}) or {}
-        worker_config = (server_settings or {}).get("worker_configuration", {}) or {}
-        SR.setup_environment_manager(worker_config=worker_config)
+        ophyd_service_config = (server_settings or {}).get("ophyd_service_configuration", {}) or {}
+        print(f"{ophyd_service_config=}")
+        # ==============================================================================
+        #       TODO: ophyd-async initialization code
+        # ==============================================================================
 
         # The following message is used in unit tests to detect when HTTP server is started.
         #   Unit tests need to be modified if this message is modified.
@@ -288,8 +291,10 @@ def build_app(authentication=None, api_access=None, resource_access=None, server
         This change ensures that the application shuts down and cleans up resources even if there is
         a problem, without silencing the errors.
         """
-        # Leaving the worker process running would orphan it.
-        await SR.environment_manager.stop()
+
+        # ==============================================================================
+        #       TODO: ophyd-async cleanup code
+        # ==============================================================================
 
         for task in getattr(app.state, "tasks", []):
             task.cancel()
