@@ -3,9 +3,9 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-==============================
-Ophyd-as-Service Documentation
-==============================
+===========================
+Ophyd-Service Documentation
+===========================
 
 .. toctree::
    :maxdepth: 1

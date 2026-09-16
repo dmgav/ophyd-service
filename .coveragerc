@@ -1,6 +1,6 @@
 [run]
 source =
-    ophyd_as_service
+    ophyd_service
 [report]
 omit =
     */python?.?/*
