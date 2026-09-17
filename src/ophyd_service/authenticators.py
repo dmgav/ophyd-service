@@ -850,7 +850,7 @@ class LDAPAuthenticator(InternalAuthenticator):
 
         uvicorn:
             host: localhost
-            port: 60610
+            port: 60620
         authentication:
             providers:
                 - provider: ldap_local

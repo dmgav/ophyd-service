@@ -1,0 +1,221 @@
+import os
+import time as ttime
+from typing import Any
+
+import httpx
+import pytest
+import requests
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jose.backends import RSAKey
+from respx import MockRouter
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from xprocess import ProcessStarter
+
+from ophyd_service.database.base import Base
+
+SERVER_ADDRESS = "localhost"
+SERVER_PORT = "60620"
+OPHYD_SERVICE_APP = "ophyd_service.server:app"
+
+# Single-user API key used for most of the tests
+API_KEY_FOR_TESTS = "APIKEYFORTESTS"
+
+
+def _wait_for_http_server_ready(*, http_server_host, http_server_port, timeout=10, request_prefix="/api"):
+    """Wait until HTTP server accepts connections and responds to /ping."""
+    t_stop = ttime.time() + timeout
+    url = f"http://{http_server_host}:{http_server_port}{request_prefix}/ping"
+    while ttime.time() < t_stop:
+        try:
+            response = requests.get(url, timeout=0.5)
+            # Any HTTP response means the server is up (auth may still reject request).
+            if response.status_code:
+                return
+        except requests.RequestException:
+            pass
+        ttime.sleep(0.1)
+    raise TimeoutError(f"HTTP server is not ready after {timeout} s: {url}")
+
+
+@pytest.fixture(scope="module")
+def fastapi_server(xprocess):
+
+    class Starter(ProcessStarter):
+        env = dict(os.environ)
+        env["OPHYD_SERVICE_SINGLE_USER_API_KEY"] = API_KEY_FOR_TESTS
+
+        pattern = "Ophyd-Service server started successfully"
+        args = f"uvicorn --host={SERVER_ADDRESS} --port {SERVER_PORT} {OPHYD_SERVICE_APP}".split()
+
+    xprocess.ensure("fastapi_server", Starter)
+    _wait_for_http_server_ready(http_server_host=SERVER_ADDRESS, http_server_port=SERVER_PORT)
+
+    yield
+
+    xprocess.getinfo("fastapi_server").terminate()
+
+
+@pytest.fixture
+def fastapi_server_fs(xprocess):
+    """
+    FastAPI server with function scope. Should not be executed in the same module as ``fastapi_server``.
+    The server must be explicitly started in the unit test code as ``fastapi_server_fs()``. This allows
+    to perform additional steps (such as setting environmental variables) before the server is started.
+    """
+
+    def start(http_server_host=SERVER_ADDRESS, http_server_port=SERVER_PORT, api_key=API_KEY_FOR_TESTS):
+        class Starter(ProcessStarter):
+            max_read_lines = 53
+
+            env = dict(os.environ)
+            if api_key:
+                env["OPHYD_SERVICE_SINGLE_USER_API_KEY"] = api_key
+
+            pattern = "Ophyd-Service server started successfully"
+            args = f"uvicorn --host={http_server_host} --port {http_server_port} {OPHYD_SERVICE_APP}".split()
+
+        xprocess.ensure("fastapi_server", Starter)
+        _wait_for_http_server_ready(http_server_host=http_server_host, http_server_port=http_server_port)
+
+    yield start
+
+    xprocess.getinfo("fastapi_server").terminate()
+
+
+def setup_server_with_config_file(*, config_file_str, tmpdir, monkeypatch):
+    """
+    Creates config file for the server in ``tmpdir/config/`` directory and
+    sets up the respective environment variable. Sets ``tmpdir`` as a current directory.
+    """
+    print(f"SERVER CONFIGURATION:\n{'-' * 50}\n{config_file_str}\n{'-' * 50}")
+    config_fln = "config_ophyd_service.yml"
+    config_dir = os.path.join(tmpdir, "config")
+    config_path = os.path.join(config_dir, config_fln)
+    os.makedirs(config_dir)
+    with open(config_path, "w") as f:
+        f.writelines(config_file_str)
+
+    sqlite_path = os.path.join(tmpdir, "ophyd-service.sqlite")
+    sqlite_path = "sqlite:///" + sqlite_path
+
+    monkeypatch.setenv("OPHYD_SERVICE_CONFIG", config_path)
+    monkeypatch.setenv("OPHYD_SERVICE_DATABASE_URI", sqlite_path)
+    monkeypatch.chdir(tmpdir)
+
+    return config_path
+
+
+def request_to_json(
+    request_type, path, *, request_prefix="/api", api_key=API_KEY_FOR_TESTS, token=None, login=None, **kwargs
+):
+    if login:
+        auth = None
+        data = {"username": login[0], "password": login[1]}
+        kwargs.setdefault("data", {})
+        kwargs.update({"data": data})
+    elif token:
+        auth = None
+        headers = {"Authorization": f"Bearer {token}"}
+        kwargs.update({"auth": auth, "headers": headers})
+    elif api_key:
+        auth = None
+        headers = {"Authorization": f"ApiKey {api_key}"}
+        kwargs.update({"auth": auth, "headers": headers})
+
+    method = getattr(requests, request_type)
+    resp = method(f"http://{SERVER_ADDRESS}:{SERVER_PORT}{request_prefix}{path}", **kwargs)
+    resp = resp.json()
+    return resp
+
+
+# ============================================================================
+# AUTH Test Fixtures
+# ============================================================================
+
+
+@pytest.fixture
+def oidc_well_known_url(oidc_base_url: str) -> str:
+    return f"{oidc_base_url}.well-known/openid-configuration"
+
+
+@pytest.fixture
+def keys() -> tuple[rsa.RSAPrivateKey, rsa.RSAPublicKey]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    return (private_key, public_key)
+
+
+@pytest.fixture
+def json_web_keyset(keys: tuple[rsa.RSAPrivateKey, rsa.RSAPublicKey]) -> list[dict[str, Any]]:
+    _, public_key = keys
+    return [RSAKey(key=public_key, algorithm="RS256").to_dict()]
+
+
+@pytest.fixture
+def mock_oidc_server(
+    respx_mock: MockRouter,
+    oidc_well_known_url: str,
+    well_known_response: dict[str, Any],
+    json_web_keyset: list[dict[str, Any]],
+) -> MockRouter:
+    respx_mock.get(oidc_well_known_url).mock(return_value=httpx.Response(httpx.codes.OK, json=well_known_response))
+    respx_mock.get(well_known_response["jwks_uri"]).mock(
+        return_value=httpx.Response(httpx.codes.OK, json={"keys": json_web_keyset})
+    )
+    return respx_mock
+
+
+@pytest.fixture
+def sqlite_session():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.fixture
+def oidc_base_url() -> str:
+    """Base URL for mock OIDC provider."""
+    return "https://example.com/realms/example/"
+
+
+@pytest.fixture
+def well_known_response(oidc_base_url: str) -> dict:
+    """Mock OIDC well-known configuration response."""
+    return {
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "issuer": oidc_base_url.rstrip("/"),
+        "jwks_uri": f"{oidc_base_url}protocol/openid-connect/certs",
+        "authorization_endpoint": f"{oidc_base_url}protocol/openid-connect/auth",
+        "token_endpoint": f"{oidc_base_url}protocol/openid-connect/token",
+        "device_authorization_endpoint": f"{oidc_base_url}protocol/openid-connect/auth/device",
+        "end_session_endpoint": f"{oidc_base_url}protocol/openid-connect/logout",
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def print_open_file_descriptors(request):
+    yield
+    ttime.sleep(1)
+    pid = os.getpid()
+    fd_dir = f"/proc/{pid}/fd"
+    fd_entries = sorted(os.listdir(fd_dir), key=int)
+    msg = f"+++ PID={pid} OPEN FILE DESCRIPTORS = {len(fd_entries)}"
+    # terminalreporter works on CI (it is supposed to work locally, but it doesn't)
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    reporter.write_line(msg)
+    # /dev/tty bypasses all pytest capture layers (local use only)
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write("\n" + msg + "\n")
+    except OSError:
+        import sys
+
+        sys.stderr.write("\n" + msg + "\n")
+        sys.stderr.flush()

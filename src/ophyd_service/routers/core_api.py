@@ -51,7 +51,7 @@ async def ping_handler(payload: dict = {}, principal=Security(get_current_princi
 @router.get("/device/read/{device_name:path}")
 async def device_read_handler(
     device_name: str,
-    principal=Security(get_current_principal, scopes=["read:status"]),
+    principal=Security(get_current_principal, scopes=["read:devices"]),
     settings: BaseSettings = Depends(get_settings),
     api_access_manager=Depends(get_api_access_manager),
     resource_access_manager=Depends(get_resource_access_manager),
@@ -168,7 +168,7 @@ heartbeat_message_stream = HeartbeatMessageStream()
 
 
 @router.websocket("/monitor/ws")
-async def monitor_websocket_handler(websocket: WebSocket, scopes=["read:monitor"]):
+async def monitor_websocket_handler(websocket: WebSocket, scopes=["read:devices"]):
     """
     Stream the data on the monitored PVs published by the environment manager. Only the messages
     published while the connection is open are sent to the client. The client may send JSON

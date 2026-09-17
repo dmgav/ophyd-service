@@ -94,7 +94,7 @@ filterwarnings = [
     "ignore::DeprecationWarning",
 ]
 # Doctest python code in docs, python code in src docstrings, test functions in tests
-testpaths = "src/tests"
+testpaths = "src/ophyd_service/tests"
 
 [tool.coverage.run]
 data_file = "/tmp/ophyd_service.coverage"
@@ -107,7 +107,7 @@ exclude_lines = ["if __name__ == '__main__':"]
 source = ["src", "**/site-packages/"]
 
 [tool.ruff]
-src = ["src", "tests"]
+src = ["src"]
 line-length = 115
 exclude = [
     "docs/source/conf.py",
