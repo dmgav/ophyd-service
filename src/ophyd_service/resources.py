@@ -1,3 +1,4 @@
+from .service.device_control import DeviceControl
 from .service.device_registry import DeviceRegistry
 
 
@@ -13,6 +14,13 @@ class _ServerResources:
     @property
     def device_registry(self):
         return self._device_registry
+
+    def setup_device_control(self, **kwargs):
+        self._device_control = DeviceControl(**kwargs)
+
+    @property
+    def device_control(self):
+        return self._device_control
 
     def set_custom_code_modules(self, custom_code_modules):
         self._custom_code_modules = custom_code_modules

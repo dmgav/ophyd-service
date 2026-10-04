@@ -31,6 +31,10 @@ class DeviceRegistry:
         self._env_exists = False
         self._ns = {}
 
+    @property
+    def ns(self):
+        return self._ns
+
     def load_startup_code(self):
         """
         Load the startup code into the namespace. IPython is used if ``use_ipython_kernel``
@@ -64,3 +68,26 @@ class DeviceRegistry:
         except Exception as ex:
             logger.error("Failed to load startup code: %s", ex)
             self._ns.clear()
+
+    # def _validate_device_name(self, device_name, *, user_group):
+    #     """
+    #     Check if the device may be accessed by the user. The name is validated using permissions
+    #     of the 'root' group and then the permissions of the user group. Raises ``RuntimeError``
+    #     if the device name is not allowed.
+    #     """
+    #     user_groups = self._user_group_permissions.get("user_groups", {})
+
+    #     for group in ("root", user_group):
+    #         permissions = user_groups.get(group)
+    #         if permissions is None:
+    #             raise RuntimeError(f"Permissions for the user group {group!r} are not defined.")
+
+    #         # If the lists are not defined, then no devices are allowed.
+    #         allowed = device_name_is_allowed(
+    #             device_name,
+    #             allow_patterns=permissions.get("allowed_devices_read", []),
+    #             disallow_patterns=permissions.get("forbidden_devices_read", []),
+    #         )
+
+    #         if not allowed:
+    #             raise RuntimeError(f"Device {device_name!r} is not allowed for the user group {group!r}.")

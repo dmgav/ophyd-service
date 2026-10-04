@@ -281,6 +281,7 @@ def build_app(authentication=None, api_access=None, resource_access=None, server
 
         SR.setup_device_registry(service_config=ophyd_service_config)
         SR.device_registry.load_startup_code()
+        SR.setup_device_control(device_registry=SR.device_registry)
 
         # ==============================================================================
         #       TODO: ophyd-async initialization code

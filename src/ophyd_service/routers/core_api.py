@@ -71,7 +71,14 @@ async def device_read_handler(
         user_group,
         device_name,
     )
-    return {"success": True, "msg": "", "device_name": device_name, "value": {}}
+
+    result = await SR.device_control.device_read_handler(device_name, user_group)
+    return {
+        "success": result["success"],
+        "err_msg": result["err_msg"],
+        "device_name": device_name,
+        "result": result["result"],
+    }
 
 
 # WebSocket close codes.  4001 = invalid token, 4401 = auth required
