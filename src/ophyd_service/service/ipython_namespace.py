@@ -6,6 +6,7 @@ to another project as is.
 """
 
 import logging
+import signal
 import sys
 import traceback
 
@@ -118,11 +119,14 @@ def load_worker_startup_code_ipython(
         app.transport = "ipc"
 
     # Initialization replaces the standard streams and hooks, they are restored afterwards.
+    #   IPKernelApp also sets SIGINT to be ignored, which would make Ctrl-C stop working.
     saved = (sys.stdout, sys.stderr, sys.displayhook, sys.excepthook)
+    saved_sigint = signal.getsignal(signal.SIGINT)
     try:
         app.initialize([])
     finally:
         sys.stdout, sys.stderr, sys.displayhook, sys.excepthook = saved
+        signal.signal(signal.SIGINT, saved_sigint)
         app.cleanup_connection_file()
 
     if tracebacks:
@@ -152,12 +156,14 @@ def cleanup_ipykernel_app():
 
     # Closing the app restores the standard streams, but not the hooks.
     saved = (sys.stdout, sys.stderr, sys.displayhook, sys.excepthook)
+    saved_sigint = signal.getsignal(signal.SIGINT)
     try:
         app.close()
     except Exception:
         logger.exception("Failed to close IPKernelApp")
     finally:
         sys.stdout, sys.stderr, sys.displayhook, sys.excepthook = saved
+        signal.signal(signal.SIGINT, saved_sigint)
         app.cleanup_connection_file()
 
     for obj in (shell, kernel, app):

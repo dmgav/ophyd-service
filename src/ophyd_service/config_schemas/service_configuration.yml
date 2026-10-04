@@ -20,8 +20,28 @@ properties:
     properties:
       startup_dir:
         type: string
-        description: |
-          Add necessary properties
+        description: Path to the directory with startup files. Mutually exclusive with the other startup options.
+      startup_module_name:
+        type: string
+        description: Name of the installed Python module that contains the startup code.
+      startup_script_path:
+        type: string
+        description: Path to the script that contains the startup code.
+      startup_profile:
+        type: string
+        description: Name of the IPython profile used to locate the startup files.
+      ipython_dir:
+        type: string
+        description: Path to the IPython directory that contains the profiles.
+      user_group_permissions_path:
+        type: string
+        description: Path to the file (or directory) with user group permissions. Defaults to the startup directory.
+      use_ipython_kernel:
+        type: boolean
+        description: Run the worker environment in IPython kernel. Default is false.
+      device_max_depth:
+        type: integer
+        description: Maximum depth of subdevices included in the list of existing devices (0 - unlimited). Default is 0.
   server_configuration:
     type: [object]
     additionalProperties: false

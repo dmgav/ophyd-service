@@ -1,8 +1,18 @@
+from .service.device_registry import DeviceRegistry
+
+
 class _ServerResources:
     def __init__(self):
         self._custom_code_modules = []
         self._console_output_loader = None
         self._stop_server = False
+
+    def setup_device_registry(self, **kwargs):
+        self._device_registry = DeviceRegistry(**kwargs)
+
+    @property
+    def device_registry(self):
+        return self._device_registry
 
     def set_custom_code_modules(self, custom_code_modules):
         self._custom_code_modules = custom_code_modules

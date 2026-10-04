@@ -18,6 +18,7 @@ from .database.core import purge_expired
 from .protocols import ExternalAuthenticator, InternalAuthenticator
 from .resources import SERVER_RESOURCES as SR  # noqa: F401
 from .routers import core_api
+from .service.parameters import adjust_startup_options
 from .settings import get_settings
 from .utils import (
     API_KEY_COOKIE_NAME,
@@ -275,7 +276,12 @@ def build_app(authentication=None, api_access=None, resource_access=None, server
 
         # server_config = (server_settings or {}).get("server_configuration", {}) or {}
         ophyd_service_config = (server_settings or {}).get("ophyd_service_configuration", {}) or {}
+        adjust_startup_options(ophyd_service_config)
         print(f"{ophyd_service_config=}")
+
+        SR.setup_device_registry(service_config=ophyd_service_config)
+        SR.device_registry.load_startup_code()
+
         # ==============================================================================
         #       TODO: ophyd-async initialization code
         # ==============================================================================
