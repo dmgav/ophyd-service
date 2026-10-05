@@ -48,8 +48,9 @@ async def ping_handler(payload: dict = {}, principal=Security(get_current_princi
     return msg
 
 
-@router.get("/device/read/{device_name:path}")
+@router.get("/device/{method}/{device_name:path}")
 async def device_read_handler(
+    method: str,
     device_name: str,
     principal=Security(get_current_principal, scopes=["read:devices"]),
     settings: BaseSettings = Depends(get_settings),
@@ -72,7 +73,9 @@ async def device_read_handler(
         device_name,
     )
 
-    result = await SR.device_control.device_read_handler(device_name, user_group)
+    result = await SR.device_control.device_read_handler(
+        device_name=device_name, method=method, user_group=user_group
+    )
     return {
         "success": result["success"],
         "err_msg": result["err_msg"],

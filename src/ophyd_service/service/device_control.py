@@ -24,7 +24,7 @@ class DeviceControl:
     def __init__(self, device_registry: DeviceRegistry):
         self._device_registry = device_registry
 
-    async def device_read_handler(self, device_name, user_group):
+    async def device_read_handler(self, device_name, method, user_group):
         """
         Read the device with the name ``device_name``.
         """
@@ -36,6 +36,10 @@ class DeviceControl:
             if not isinstance(device_name, str) or not _device_name_pattern.fullmatch(device_name):
                 raise ValueError(f"Invalid device name: {device_name!r}")
 
+            supported_methods = ("read", "get")
+            if method not in supported_methods:
+                raise ValueError(f"Unsupported method {method!r}. Supported methods: {supported_methods}")
+
             # self._validate_device_name(device_name, user_group=user_group)
 
             # In IPython mode the namespace is the user namespace of the kernel.
@@ -45,13 +49,29 @@ class DeviceControl:
             except Exception as ex:
                 raise RuntimeError(f"Device '{device_name}' is not found in the namespace: {ex}") from ex
 
-            if not hasattr(device, "read"):
-                raise RuntimeError(f"Object '{device_name}' has no attribute 'read'")
+            def _check_method(_attr):
+                if not hasattr(device, _attr):
+                    raise RuntimeError(
+                        f"Object {device_name!r} has no attribute {_attr!r}. Method {method!r} is not supported"
+                    )
 
-            if inspect.iscoroutinefunction(device.read):
-                coro = device.read()
+            if method == "read":
+                if inspect.iscoroutinefunction(device.read):
+                    _check_method("read")
+                    coro = device.read()
+                else:
+                    _check_method("read")
+                    coro = asyncio.to_thread(device.read)
+            elif method == "get":
+                if inspect.iscoroutinefunction(device.read):
+                    _check_method("get_value")
+                    coro = device.get_value()
+                else:
+                    _check_method("get")
+                    coro = asyncio.to_thread(device.get)
             else:
-                coro = asyncio.to_thread(device.read)
+                # This exception should never be raised
+                raise RuntimeError(f"Unknown method {method!r}")
 
             value = await coro
             json.dumps(value)
