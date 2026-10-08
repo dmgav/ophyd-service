@@ -3,6 +3,7 @@ import logging
 from bluesky_queueserver.manager.profile_ops import load_worker_startup_code
 
 from .ipython_namespace import load_worker_startup_code_ipython
+from .user_permissions import load_user_group_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,11 @@ class DeviceRegistry:
         self._ns.clear()
         self._env_exists = False
 
-        logger.info("Loading startup code (IPython kernel enabled: %s) ...", self._use_ipython_kernel)
-
         try:
+            logger.info(f"Loading user group permissions from {self._user_group_permissions_path!r}")
+            self._user_group_permissions = load_user_group_permissions(self._user_group_permissions_path)
+
+            logger.info("Loading startup code (IPython kernel enabled: %s) ...", self._use_ipython_kernel)
             if self._use_ipython_kernel:
                 load_worker_startup_code_ipython(
                     startup_profile=self._startup_profile,
@@ -66,7 +69,7 @@ class DeviceRegistry:
             logger.info("Startup code was loaded successfully.")
 
         except Exception as ex:
-            logger.error("Failed to load startup code: %s", ex)
+            logger.error("Failed to populate registry: %s", ex)
             self._ns.clear()
 
     # def _validate_device_name(self, device_name, *, user_group):

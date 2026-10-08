@@ -1,0 +1,14 @@
+user_groups:
+  root:  # Defines the rules for preliminary filtering of plan/device/function names for all groups.
+    allowed_devices_read:
+      - null  # Allow all
+    forbidden_devices_read:
+      - ":^_:?.*"  # All devices with names starting with '_'
+  primary:  # Default group. The group can be renamed or other groups may be created.
+    allowed_devices_read:
+      - null  # Allow all
+    forbidden_devices_read:
+      - ":^sim_bundle_B:?.*"  # All devices with names starting with '_'
+  test_user:  # Another group used for unit tests.
+    allowed_devices_read:
+      - null  # Allow all

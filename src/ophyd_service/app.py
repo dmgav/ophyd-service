@@ -3,6 +3,7 @@ import collections
 import importlib
 import logging
 import os
+import pprint
 import re
 import secrets
 import urllib.parse
@@ -277,7 +278,7 @@ def build_app(authentication=None, api_access=None, resource_access=None, server
         # server_config = (server_settings or {}).get("server_configuration", {}) or {}
         ophyd_service_config = (server_settings or {}).get("ophyd_service_configuration", {}) or {}
         adjust_startup_options(ophyd_service_config)
-        print(f"{ophyd_service_config=}")
+        logger.info(f"ophyd_service_config = {pprint.pformat(ophyd_service_config)}")
 
         SR.setup_device_registry(service_config=ophyd_service_config)
         SR.device_registry.load_startup_code()
