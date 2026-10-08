@@ -1,7 +1,9 @@
 import logging
+import pprint
 
 from bluesky_queueserver.manager.profile_ops import load_worker_startup_code
 
+from .device_list import existing_plans_and_devices_from_nspace, select_allowed_devices
 from .ipython_namespace import load_worker_startup_code_ipython
 from .user_permissions import load_user_group_permissions
 
@@ -64,6 +66,15 @@ class DeviceRegistry:
                     startup_script_path=self._startup_script_path,
                     nspace=self._ns,
                 )
+
+            existing_devices, _ = existing_plans_and_devices_from_nspace(
+                nspace=self._ns, max_depth=self._device_max_depth
+            )
+            allowed_devices = select_allowed_devices(
+                existing_devices=existing_devices, user_group_permissions=self._user_group_permissions
+            )
+            print(f"existing_devices = {pprint.pformat(existing_devices)}")
+            print(f"allowed_devices = {pprint.pformat(allowed_devices)}")
 
             self._env_exists = True
             logger.info("Startup code was loaded successfully.")
