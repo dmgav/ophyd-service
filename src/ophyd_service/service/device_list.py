@@ -318,3 +318,31 @@ def flatten_allowed_devices(allowed_devices):
         group: {access: flatten_device_tree(devices) for access, devices in group_devices.items()}
         for group, group_devices in allowed_devices.items()
     }
+
+
+def existing_device_objects(*, existing_devices, nspace):
+    """
+    Generate a dictionary that maps device names to device objects from the namespace.
+    The reference is set to ``None`` if the device can not be evaluated in the namespace.
+
+    Parameters
+    ----------
+    existing_devices: dict
+        Flat dictionary of existing devices returned by ``flatten_device_tree``.
+    nspace: dict
+        Namespace that contains the devices.
+
+    Returns
+    -------
+    dict
+        Dictionary of device objects. The keys are full device names, e.g.
+        ``'device.component.subcomponent'``.
+    """
+    device_objects = {}
+    for name in existing_devices:
+        try:
+            device_objects[name] = eval(name, nspace)
+        except Exception as ex:
+            device_objects[name] = None
+            logger.warning("Failed to obtain reference to device %r: %s", name, ex)
+    return device_objects

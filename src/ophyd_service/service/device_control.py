@@ -4,7 +4,7 @@ import json
 import logging
 import re
 
-from .device_registry import DeviceRegistry
+from .device_registry import DeviceAccessType, DeviceRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -36,44 +36,52 @@ class DeviceControl:
             if not isinstance(device_name, str) or not _device_name_pattern.fullmatch(device_name):
                 raise ValueError(f"Invalid device name: {device_name!r}")
 
-            supported_methods = ("read", "get")
+            supported_methods = ("read", "describe", "get", "properties")
             if method not in supported_methods:
                 raise ValueError(f"Unsupported method {method!r}. Supported methods: {supported_methods}")
 
             # self._validate_device_name(device_name, user_group=user_group)
 
-            # In IPython mode the namespace is the user namespace of the kernel.
-            ns = self._device_registry.ns
-            try:
-                device = eval(device_name, ns, ns)  # noqa: S307
-            except Exception as ex:
-                raise RuntimeError(f"Device '{device_name}' is not found in the namespace: {ex}") from ex
+            device_obj, device_properties = self._device_registry.get_device(
+                device_name, user_group=user_group, access_type=DeviceAccessType.READ
+            )
 
             def _check_method(_attr):
-                if not hasattr(device, _attr):
+                if not hasattr(device_obj, _attr):
                     raise RuntimeError(
                         f"Object {device_name!r} has no attribute {_attr!r}. Method {method!r} is not supported"
                     )
 
-            if method == "read":
-                if inspect.iscoroutinefunction(device.read):
-                    _check_method("read")
-                    coro = device.read()
+            read_task = None
+            if method == "properties":
+                value = device_properties
+            elif method == "read":
+                if not device_properties.get("is_readable", False):
+                    raise RuntimeError(f"Method {method!r} is not supported for the device {device_name!r}")
+                if inspect.iscoroutinefunction(device_obj.read):
+                    read_task = device_obj.read()
                 else:
-                    _check_method("read")
-                    coro = asyncio.to_thread(device.read)
+                    read_task = asyncio.to_thread(device_obj.read)
+            elif method == "describe":
+                if not device_properties.get("is_readable", False):
+                    raise RuntimeError(f"Method {method!r} is not supported for the device {device_name!r}")
+                if inspect.iscoroutinefunction(device_obj.describe):
+                    read_task = device_obj.describe()
+                else:
+                    read_task = asyncio.to_thread(device_obj.describe)
             elif method == "get":
-                if inspect.iscoroutinefunction(device.read):
+                if inspect.iscoroutinefunction(device_obj.read):
                     _check_method("get_value")
-                    coro = device.get_value()
+                    read_task = device_obj.get_value()
                 else:
                     _check_method("get")
-                    coro = asyncio.to_thread(device.get)
+                    read_task = asyncio.to_thread(device_obj.get)
             else:
                 # This exception should never be raised
                 raise RuntimeError(f"Unknown method {method!r}")
 
-            value = await coro
+            if read_task is not None:
+                value = await read_task
             json.dumps(value)
 
             success, err_msg = True, ""

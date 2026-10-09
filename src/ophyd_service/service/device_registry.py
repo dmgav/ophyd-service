@@ -1,9 +1,11 @@
+import enum
 import logging
 import pprint
 
 from bluesky_queueserver.manager.profile_ops import load_worker_startup_code
 
 from .device_list import (
+    existing_device_objects,
     existing_plans_and_devices_from_nspace,
     flatten_allowed_devices,
     flatten_device_tree,
@@ -13,6 +15,12 @@ from .ipython_namespace import load_worker_startup_code_ipython
 from .user_permissions import load_user_group_permissions
 
 logger = logging.getLogger(__name__)
+
+
+class DeviceAccessType(str, enum.Enum):
+    READ = "read"
+    WRITE_IDLE = "write_idle"
+    WRITE_ALWAYS = "write_always"
 
 
 class DeviceRegistry:
@@ -39,6 +47,7 @@ class DeviceRegistry:
         self._env_exists = False
         self._ns = {}
         self._existing_devices = {}
+        self._existing_devices_obj = {}
         self._allowed_devices = {}
 
     @property
@@ -48,6 +57,10 @@ class DeviceRegistry:
     @property
     def existing_devices(self):
         return self._existing_devices
+
+    @property
+    def existing_devices_obj(self):
+        return self._existing_devices_obj
 
     @property
     def allowed_devices(self):
@@ -87,6 +100,9 @@ class DeviceRegistry:
             )
             existing_devices = flatten_device_tree(existing_devices_tree)
             self._existing_devices = existing_devices
+            self._existing_devices_obj = existing_device_objects(
+                existing_devices=existing_devices, nspace=self._ns
+            )
 
             allowed_devices_tree = select_allowed_devices(
                 existing_devices=existing_devices_tree, user_group_permissions=self._user_group_permissions
@@ -106,27 +122,64 @@ class DeviceRegistry:
             logger.error("Failed to populate registry: %s", ex)
             self._ns.clear()
             self._existing_devices.clear()
+            self._existing_devices_obj.clear()
             self._allowed_devices.clear()
 
-    # def _validate_device_name(self, device_name, *, user_group):
-    #     """
-    #     Check if the device may be accessed by the user. The name is validated using permissions
-    #     of the 'root' group and then the permissions of the user group. Raises ``RuntimeError``
-    #     if the device name is not allowed.
-    #     """
-    #     user_groups = self._user_group_permissions.get("user_groups", {})
+    def get_device(self, device_name, *, user_group, access_type):
+        """
+        Return a reference to the device object and the device properties if the requested type
+        of access is allowed for the user group. Access of type ``WRITE_IDLE`` is also granted
+        if the device is allowed for ``WRITE_ALWAYS`` access.
 
-    #     for group in ("root", user_group):
-    #         permissions = user_groups.get(group)
-    #         if permissions is None:
-    #             raise RuntimeError(f"Permissions for the user group {group!r} are not defined.")
+        Parameters
+        ----------
+        device_name: str
+            Full device name, e.g. ``'device.component.subcomponent'``.
+        user_group: str
+            Name of the user group.
+        access_type: DeviceAccessType
+            Requested type of access.
 
-    #         # If the lists are not defined, then no devices are allowed.
-    #         allowed = device_name_is_allowed(
-    #             device_name,
-    #             allow_patterns=permissions.get("allowed_devices_read", []),
-    #             disallow_patterns=permissions.get("forbidden_devices_read", []),
-    #         )
+        Returns
+        -------
+        object
+            Reference to the device object.
+        dict
+            Device properties.
 
-    #         if not allowed:
-    #             raise RuntimeError(f"Device {device_name!r} is not allowed for the user group {group!r}.")
+        Raises
+        ------
+        RuntimeError
+            The device does not exist, access is not allowed or the device can not be obtained.
+        """
+        access_type = DeviceAccessType(access_type)
+
+        if user_group not in self._allowed_devices:
+            raise RuntimeError(f"User group {user_group!r} does not exist")
+
+        if device_name not in self._existing_devices:
+            raise RuntimeError(f"Device {device_name!r} does not exist")
+
+        if access_type == DeviceAccessType.WRITE_IDLE:
+            access_types = (DeviceAccessType.WRITE_IDLE, DeviceAccessType.WRITE_ALWAYS)
+        else:
+            access_types = (access_type,)
+
+        group_devices = self._allowed_devices[user_group]
+        if not any(device_name in group_devices.get(access.value, {}) for access in access_types):
+            raise RuntimeError(
+                f"Access of type {access_type.value!r} to device {device_name!r} "
+                f"is not allowed for user group {user_group!r}"
+            )
+
+        if device_name not in self._existing_devices_obj:
+            raise RuntimeError(f"Reference to device {device_name!r} is not found")
+        device_obj = self._existing_devices_obj[device_name]
+        if device_obj is None:
+            raise RuntimeError(f"Reference to device {device_name!r} is None")
+
+        device_properties = self._existing_devices.get(device_name)
+        if device_properties is None:
+            raise RuntimeError(f"Properties of device {device_name!r} are not found")
+
+        return device_obj, device_properties
