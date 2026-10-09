@@ -3,7 +3,12 @@ import pprint
 
 from bluesky_queueserver.manager.profile_ops import load_worker_startup_code
 
-from .device_list import existing_plans_and_devices_from_nspace, select_allowed_devices
+from .device_list import (
+    existing_plans_and_devices_from_nspace,
+    flatten_allowed_devices,
+    flatten_device_tree,
+    select_allowed_devices,
+)
 from .ipython_namespace import load_worker_startup_code_ipython
 from .user_permissions import load_user_group_permissions
 
@@ -33,10 +38,20 @@ class DeviceRegistry:
 
         self._env_exists = False
         self._ns = {}
+        self._existing_devices = {}
+        self._allowed_devices = {}
 
     @property
     def ns(self):
         return self._ns
+
+    @property
+    def existing_devices(self):
+        return self._existing_devices
+
+    @property
+    def allowed_devices(self):
+        return self._allowed_devices
 
     def load_startup_code(self):
         """
@@ -67,12 +82,20 @@ class DeviceRegistry:
                     nspace=self._ns,
                 )
 
-            existing_devices, _ = existing_plans_and_devices_from_nspace(
+            existing_devices_tree, _ = existing_plans_and_devices_from_nspace(
                 nspace=self._ns, max_depth=self._device_max_depth
             )
-            allowed_devices = select_allowed_devices(
-                existing_devices=existing_devices, user_group_permissions=self._user_group_permissions
+            existing_devices = flatten_device_tree(existing_devices_tree)
+            self._existing_devices = existing_devices
+
+            allowed_devices_tree = select_allowed_devices(
+                existing_devices=existing_devices_tree, user_group_permissions=self._user_group_permissions
             )
+            allowed_devices = flatten_allowed_devices(allowed_devices_tree)
+            self._allowed_devices = allowed_devices
+
+            # print(f"existing_devices_tree = {pprint.pformat(existing_devices_tree)}")
+            # print(f"allowed_devices_tree = {pprint.pformat(allowed_devices_tree)}")
             print(f"existing_devices = {pprint.pformat(existing_devices)}")
             print(f"allowed_devices = {pprint.pformat(allowed_devices)}")
 
@@ -82,6 +105,8 @@ class DeviceRegistry:
         except Exception as ex:
             logger.error("Failed to populate registry: %s", ex)
             self._ns.clear()
+            self._existing_devices.clear()
+            self._allowed_devices.clear()
 
     # def _validate_device_name(self, device_name, *, user_group):
     #     """

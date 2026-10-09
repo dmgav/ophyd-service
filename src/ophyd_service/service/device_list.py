@@ -264,3 +264,57 @@ def select_allowed_devices(
         allowed_devices["root"] = {access: {} for access in access_types}
 
     return allowed_devices
+
+
+def _flatten_device_tree(devices, *, prefix=""):
+    flat_devices = {}
+    for name, description in devices.items():
+        full_name = f"{prefix}.{name}" if prefix else name
+        if not description.get("excluded", False):
+            flat_devices[full_name] = {k: v for k, v in description.items() if k != "components"}
+        if components := description.get("components"):
+            flat_devices.update(_flatten_device_tree(components, prefix=full_name))
+    return flat_devices
+
+
+def flatten_device_tree(devices):
+    """
+    Flatten a hierarchical tree of device descriptions. Devices and all their components
+    and subcomponents are placed at the top level of the returned dictionary. Devices marked
+    with ``"excluded": True`` are skipped, but their components are still included.
+
+    Parameters
+    ----------
+    devices: dict
+        Tree of device descriptions (key - device name, value - device description).
+        Components of a device are listed in the ``components`` key of its description.
+
+    Returns
+    -------
+    dict
+        Flat dictionary of device descriptions (without the ``components`` key). The keys
+        are full device names, e.g. ``'device.component.subcomponent'``.
+    """
+    return _flatten_device_tree(devices)
+
+
+def flatten_allowed_devices(allowed_devices):
+    """
+    Flatten the hierarchical lists of allowed devices returned by ``select_allowed_devices``.
+
+    Parameters
+    ----------
+    allowed_devices: dict
+        Dictionary of allowed devices for each user group and access type.
+
+    Returns
+    -------
+    dict
+        Dictionary with the same user groups and access types. Each list of devices includes
+        devices and all their components (without the ``components`` key) at the top level.
+        The keys are full device names, e.g. ``'device.component.subcomponent'``.
+    """
+    return {
+        group: {access: flatten_device_tree(devices) for access, devices in group_devices.items()}
+        for group, group_devices in allowed_devices.items()
+    }
