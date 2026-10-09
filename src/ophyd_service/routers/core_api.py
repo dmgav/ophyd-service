@@ -73,12 +73,16 @@ async def device_read_handler(
         device_name,
     )
 
-    result = await SR.device_control.device_read_handler(
-        device_name=device_name, method=method, user_group=user_group
-    )
+    if method in ("properties", "permissions"):
+        handler = SR.device_control.device_info_handler
+    else:
+        handler = SR.device_control.device_read_handler
+    result = await handler(device_name=device_name, method=method, user_group=user_group)
+
     return {
         "success": result["success"],
         "err_msg": result["err_msg"],
+        "method": method,
         "device_name": device_name,
         "result": result["result"],
     }

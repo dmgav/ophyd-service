@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class DeviceAccessType(str, enum.Enum):
+    INFO = "info"
     READ = "read"
     WRITE_IDLE = "write_idle"
     WRITE_ALWAYS = "write_always"
@@ -129,7 +130,8 @@ class DeviceRegistry:
         """
         Return a reference to the device object and the device properties if the requested type
         of access is allowed for the user group. Access of type ``WRITE_IDLE`` is also granted
-        if the device is allowed for ``WRITE_ALWAYS`` access.
+        if the device is allowed for ``WRITE_ALWAYS`` access. Access of type ``INFO`` is granted
+        for any existing device.
 
         Parameters
         ----------
@@ -160,17 +162,18 @@ class DeviceRegistry:
         if device_name not in self._existing_devices:
             raise RuntimeError(f"Device {device_name!r} does not exist")
 
-        if access_type == DeviceAccessType.WRITE_IDLE:
-            access_types = (DeviceAccessType.WRITE_IDLE, DeviceAccessType.WRITE_ALWAYS)
-        else:
-            access_types = (access_type,)
+        if access_type != DeviceAccessType.INFO:
+            if access_type == DeviceAccessType.WRITE_IDLE:
+                access_types = (DeviceAccessType.WRITE_IDLE, DeviceAccessType.WRITE_ALWAYS)
+            else:
+                access_types = (access_type,)
 
-        group_devices = self._allowed_devices[user_group]
-        if not any(device_name in group_devices.get(access.value, {}) for access in access_types):
-            raise RuntimeError(
-                f"Access of type {access_type.value!r} to device {device_name!r} "
-                f"is not allowed for user group {user_group!r}"
-            )
+            group_devices = self._allowed_devices[user_group]
+            if not any(device_name in group_devices.get(access.value, {}) for access in access_types):
+                raise RuntimeError(
+                    f"Access of type {access_type.value!r} to device {device_name!r} "
+                    f"is not allowed for user group {user_group!r}"
+                )
 
         if device_name not in self._existing_devices_obj:
             raise RuntimeError(f"Reference to device {device_name!r} is not found")
@@ -183,3 +186,39 @@ class DeviceRegistry:
             raise RuntimeError(f"Properties of device {device_name!r} are not found")
 
         return device_obj, device_properties
+
+    def get_device_permissions(self, device_name, *, user_group):
+        """
+        Return permissions of the user group for the device. ``write_idle`` permission is also
+        granted if the device is allowed for ``write_always`` access.
+
+        Parameters
+        ----------
+        device_name: str
+            Full device name, e.g. ``'device.component.subcomponent'``.
+        user_group: str
+            Name of the user group.
+
+        Returns
+        -------
+        dict
+            Dictionary with boolean values for the keys ``'read'``, ``'write_idle'``
+            and ``'write_always'``.
+
+        Raises
+        ------
+        RuntimeError
+            The user group or the device does not exist.
+        """
+        if user_group not in self._allowed_devices:
+            raise RuntimeError(f"User group {user_group!r} does not exist")
+
+        if device_name not in self._existing_devices:
+            raise RuntimeError(f"Device {device_name!r} does not exist")
+
+        group_devices = self._allowed_devices[user_group]
+        access_types = (DeviceAccessType.READ, DeviceAccessType.WRITE_IDLE, DeviceAccessType.WRITE_ALWAYS)
+        permissions = {access.value: device_name in group_devices.get(access.value, {}) for access in access_types}
+        permissions[DeviceAccessType.WRITE_IDLE.value] |= permissions[DeviceAccessType.WRITE_ALWAYS.value]
+
+        return permissions

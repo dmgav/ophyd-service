@@ -270,9 +270,12 @@ def _flatten_device_tree(devices, *, prefix=""):
     flat_devices = {}
     for name, description in devices.items():
         full_name = f"{prefix}.{name}" if prefix else name
+        components = description.get("components", {})
         if not description.get("excluded", False):
             flat_devices[full_name] = {k: v for k, v in description.items() if k != "components"}
-        if components := description.get("components"):
+            if components:
+                flat_devices[full_name]["components"] = list(components)
+        if components:
             flat_devices.update(_flatten_device_tree(components, prefix=full_name))
     return flat_devices
 
@@ -292,8 +295,9 @@ def flatten_device_tree(devices):
     Returns
     -------
     dict
-        Flat dictionary of device descriptions (without the ``components`` key). The keys
-        are full device names, e.g. ``'device.component.subcomponent'``.
+        Flat dictionary of device descriptions. The ``components`` key of each description
+        contains the list of component names (omitted if the device has no components).
+        The keys are full device names, e.g. ``'device.component.subcomponent'``.
     """
     return _flatten_device_tree(devices)
 
@@ -311,8 +315,8 @@ def flatten_allowed_devices(allowed_devices):
     -------
     dict
         Dictionary with the same user groups and access types. Each list of devices includes
-        devices and all their components (without the ``components`` key) at the top level.
-        The keys are full device names, e.g. ``'device.component.subcomponent'``.
+        devices and all their components at the top level, with the ``components`` key containing
+        the list of component names. The keys are full device names, e.g. ``'device.component.subcomponent'``.
     """
     return {
         group: {access: flatten_device_tree(devices) for access, devices in group_devices.items()}
