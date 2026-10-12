@@ -1,3 +1,4 @@
+import copy
 import logging
 from collections.abc import Iterable
 
@@ -322,6 +323,48 @@ def flatten_allowed_devices(allowed_devices):
         group: {access: flatten_device_tree(devices) for access, devices in group_devices.items()}
         for group, group_devices in allowed_devices.items()
     }
+
+
+def merge_allowed_devices(allowed_devices):
+    """
+    Merge flattened lists of allowed devices for each user group. The ``write_idle`` list is
+    merged into the ``write_always`` list, then the ``write_always`` list is merged into the ``read``
+    list. Lists of components of the devices that
+    are present in multiple lists are merged. The original lists are not modified.
+
+    Parameters
+    ----------
+    allowed_devices: dict
+        Flattened lists of allowed devices returned by ``flatten_allowed_devices``.
+
+    Returns
+    -------
+    dict
+        Dictionary with the same user groups and access types containing merged lists of devices.
+    """
+
+    def merge(*device_lists):
+        merged = {}
+        for devices in device_lists:
+            for name, description in devices.items():
+                if name not in merged:
+                    merged[name] = copy.deepcopy(description)
+                elif components := description.get("components"):
+                    existing = merged[name].setdefault("components", [])
+                    existing.extend(_ for _ in components if _ not in existing)
+        return merged
+
+    merged_devices = {}
+    for group, devices in allowed_devices.items():
+        write_idle = copy.deepcopy(devices["write_idle"])
+        write_always = merge(devices["write_always"], write_idle)
+        read = merge(devices["read"], write_always)
+        merged_devices[group] = {
+            "read": read,
+            "write_idle": write_idle,
+            "write_always": write_always,
+        }
+    return merged_devices
 
 
 def existing_device_objects(*, existing_devices, nspace):

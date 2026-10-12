@@ -9,6 +9,7 @@ from .device_list import (
     existing_plans_and_devices_from_nspace,
     flatten_allowed_devices,
     flatten_device_tree,
+    merge_allowed_devices,
     select_allowed_devices,
 )
 from .ipython_namespace import load_worker_startup_code_ipython
@@ -108,7 +109,7 @@ class DeviceRegistry:
             allowed_devices_tree = select_allowed_devices(
                 existing_devices=existing_devices_tree, user_group_permissions=self._user_group_permissions
             )
-            allowed_devices = flatten_allowed_devices(allowed_devices_tree)
+            allowed_devices = merge_allowed_devices(flatten_allowed_devices(allowed_devices_tree))
             self._allowed_devices = allowed_devices
 
             # print(f"existing_devices_tree = {pprint.pformat(existing_devices_tree)}")
@@ -129,8 +130,7 @@ class DeviceRegistry:
     def get_device(self, device_name, *, user_group, access_type):
         """
         Return a reference to the device object and the device properties if the requested type
-        of access is allowed for the user group. Access of type ``WRITE_IDLE`` is also granted
-        if the device is allowed for ``WRITE_ALWAYS`` access. Access of type ``INFO`` is granted
+        of access is allowed for the user group. Access of type ``INFO`` is granted
         for any existing device.
 
         Parameters
@@ -163,13 +163,7 @@ class DeviceRegistry:
             raise RuntimeError(f"Device {device_name!r} does not exist")
 
         if access_type != DeviceAccessType.INFO:
-            if access_type == DeviceAccessType.WRITE_IDLE:
-                access_types = (DeviceAccessType.WRITE_IDLE, DeviceAccessType.WRITE_ALWAYS)
-            else:
-                access_types = (access_type,)
-
-            group_devices = self._allowed_devices[user_group]
-            if not any(device_name in group_devices.get(access.value, {}) for access in access_types):
+            if device_name not in self._allowed_devices[user_group].get(access_type.value, {}):
                 raise RuntimeError(
                     f"Access of type {access_type.value!r} to device {device_name!r} "
                     f"is not allowed for user group {user_group!r}"
@@ -189,8 +183,7 @@ class DeviceRegistry:
 
     def get_device_permissions(self, device_name, *, user_group):
         """
-        Return permissions of the user group for the device. ``write_idle`` permission is also
-        granted if the device is allowed for ``write_always`` access.
+        Return permissions of the user group for the device.
 
         Parameters
         ----------
@@ -219,6 +212,5 @@ class DeviceRegistry:
         group_devices = self._allowed_devices[user_group]
         access_types = (DeviceAccessType.READ, DeviceAccessType.WRITE_IDLE, DeviceAccessType.WRITE_ALWAYS)
         permissions = {access.value: device_name in group_devices.get(access.value, {}) for access in access_types}
-        permissions[DeviceAccessType.WRITE_IDLE.value] |= permissions[DeviceAccessType.WRITE_ALWAYS.value]
 
         return permissions
