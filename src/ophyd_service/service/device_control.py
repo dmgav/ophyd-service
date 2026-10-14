@@ -24,6 +24,10 @@ class DeviceControl:
     def __init__(self, device_registry: DeviceRegistry):
         self._device_registry = device_registry
 
+    @property
+    def device_registry(self):
+        return self._device_registry
+
     async def device_info_handler(self, device_name, method, user_group):
         """
         Get information on the device with the name ``device_name``.

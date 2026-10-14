@@ -112,11 +112,6 @@ class DeviceRegistry:
             allowed_devices = merge_allowed_devices(flatten_allowed_devices(allowed_devices_tree))
             self._allowed_devices = allowed_devices
 
-            # print(f"existing_devices_tree = {pprint.pformat(existing_devices_tree)}")
-            # print(f"allowed_devices_tree = {pprint.pformat(allowed_devices_tree)}")
-            print(f"existing_devices = {pprint.pformat(existing_devices)}")
-            print(f"allowed_devices = {pprint.pformat(allowed_devices)}")
-
             self._env_exists = True
             logger.info("Startup code was loaded successfully.")
 

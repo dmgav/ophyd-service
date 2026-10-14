@@ -35,7 +35,7 @@ from ..resources import SERVER_RESOURCES as SR  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api/v1")
 
 
 @router.get("/")

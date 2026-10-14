@@ -507,7 +507,7 @@ def test_ServerBasedAPIAccessControl_04(
         assert "access_token" in resp1, pprint.pformat(resp1)
         token = resp1["access_token"]
 
-        resp2 = request_to_json("get", "/ping", token=token)
+        resp2 = request_to_json("get", "/v1/ping", token=token)
         assert "msg" in resp2, pprint.pformat(resp2)
         assert "Ophyd-Service" in resp2["msg"]
 

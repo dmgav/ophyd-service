@@ -46,7 +46,8 @@ class SimPeriodicDevice(ophyd.Device):
     )
 
 
-sim_periodic_device = SimPeriodicDevice(name="sim_periodic_device")
+sim_periodic_device1 = SimPeriodicDevice(name="sim_periodic_device1")
+sim_periodic_device2 = SimPeriodicDevice(name="sim_periodic_device2")
 
 
 # =======================================================================================

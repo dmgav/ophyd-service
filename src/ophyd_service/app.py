@@ -18,7 +18,7 @@ from .core import PatchedStreamingResponse
 from .database.core import purge_expired
 from .protocols import ExternalAuthenticator, InternalAuthenticator
 from .resources import SERVER_RESOURCES as SR  # noqa: F401
-from .routers import core_api
+from .routers import core_api, finch_api
 from .service.parameters import adjust_startup_options
 from .settings import get_settings
 from .utils import (
@@ -134,6 +134,7 @@ def build_app(authentication=None, api_access=None, resource_access=None, server
 
     # Include standard routers
     app.include_router(core_api.router)
+    app.include_router(finch_api.router)
 
     # Include custom routers
     router_names = []

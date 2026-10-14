@@ -25,20 +25,19 @@ Starting with single user API key::
 
 The API can be accessed as following:: 
 
-    http GET http://localhost:60620/api/ping 'Authorization: ApiKey a'
+    http GET http://localhost:60620/api/v1/ping 'Authorization: ApiKey a'
 
 The API that reads a device::    
 
-    http GET http://localhost:60620/api/device/read/sim_periodic_device/sine 'Authorization: ApiKey a'
+    http GET http://localhost:60620/api/v1/device/read/sim_periodic_device1 'Authorization: ApiKey a'
+    http GET http://localhost:60620/api/v1/device/get/sim_periodic_device1 'Authorization: ApiKey a'
 
+    http GET http://localhost:60620/api/v1/device/read/sim_periodic_device1/sine 'Authorization: ApiKey a'
+    http GET http://localhost:60620/api/v1/device/get/sim_periodic_device1/sine 'Authorization: ApiKey a'
 
-Running helper script for monitoring status::
+    http GET http://localhost:60620/api/v1/device/read/rand_async_device1 'Authorization: ApiKey a'
 
-    python status_monitor.py --api-key a
+    http GET http://localhost:60620/api/v1/device/read/rand_async_device1/value 'Authorization: ApiKey a'
+    http GET http://localhost:60620/api/v1/device/get/rand_async_device1/value 'Authorization: ApiKey a'
 
-Running helper script for monitoring devices (devices are available in the demo profile)::
-
-    python stream_monitor.py --api-key a --devices sim_periodic_device.noise sim_periodic_device.sine
-    python stream_monitor.py --api-key a --devices rand_async_device2.value
-    python stream_monitor.py --api-key a --devices rand_async_device1.value rand_async_device2.value
 
