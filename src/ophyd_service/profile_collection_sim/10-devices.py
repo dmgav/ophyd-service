@@ -16,7 +16,11 @@ from ophyd_async.core import (
     init_devices,
     soft_signal_r_and_setter,
 )
+from ophyd.sim import hw
 from ophyd_async.sim import PatternGenerator, SimPointDetector, SimStage
+
+# Load simulated ophyd devices (det1, motor1, ...) into the global namespace.
+globals().update(vars(hw()))
 
 # =======================================================================================
 #                  Simulated device with periodically updated readings

@@ -84,7 +84,7 @@ async def device_read_handler(
         "err_msg": result["err_msg"],
         "method": method,
         "device_name": device_name,
-        "result": result["result"],
+        "value": result["result"],
     }
 
 

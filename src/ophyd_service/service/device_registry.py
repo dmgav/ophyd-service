@@ -1,6 +1,5 @@
 import enum
 import logging
-import pprint
 
 from bluesky_queueserver.manager.profile_ops import load_worker_startup_code
 

@@ -100,7 +100,8 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             # Does not trigger when the value changes
             message = dict(kwargs)
             message["obj"] = (
-                device_name  # obj is an EpicsSignal which is not JSON serializable, overwrite it so the msg will send
+                # obj is an EpicsSignal which is not JSON serializable, overwrite it so the msg will send
+                device_name
             )
             message["device"] = device_name  # to be consistent with the message from callbackValue()
             message["signal"] = (
@@ -120,7 +121,8 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                         except WebSocketDisconnect:
                             logger.info(f"Connection closed while sending update for device: {device_name}")
                     if current_connection is True:
-                        # TODO: verify that the all signals in device are connected before sending connected=true message
+                        # TODO: verify that the all signals in device are connected
+                        #   before sending connected=true message
                         # device.connected
                         try:
                             asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
@@ -327,7 +329,8 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     await websocket.send_json(
                         {
                             "error": (
-                                f"Received action: {action}, actions must be 'subscribe', 'unsubscribe', 'refresh', "
+                                f"Received action: {action}, actions must be 'subscribe', "
+                                "'unsubscribe', 'refresh', "
                                 "'subscribeSafely', 'subscribeReadOnly', or 'set'. "
                                 "Example msg: {action: 'subscribe', device: 'motor1'}"
                             )
