@@ -16,6 +16,8 @@ description = "REST API Server for Ophyd Objects."
 dependencies = [
     "alembic",
     "bluesky-queueserver",
+    "ophyd-async",
+    "h5py",
     "cachetools",
     "fastapi",
     "httpx",
