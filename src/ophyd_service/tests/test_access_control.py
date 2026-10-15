@@ -254,7 +254,7 @@ def test_authentication_and_authorization_01(
     fastapi_server_fs()
 
     # Test if anonymous 'public' access works
-    resp1 = request_to_json("get", "/ping", api_key=None)
+    resp1 = request_to_json("get", "/v1/ping", api_key=None)
     if public_access:
         assert "msg" in resp1, pprint.pformat(resp1)
         assert "Ophyd-Service" in resp1["msg"]
@@ -263,7 +263,7 @@ def test_authentication_and_authorization_01(
         assert "Not enough permissions" in resp1["detail"]
 
     # Make sure that the anonymous 'single-user' access is not allowed
-    resp2 = request_to_json("get", "/ping")  # By default, the single user API key is sent
+    resp2 = request_to_json("get", "/v1/ping")  # By default, the single user API key is sent
     if single_user_access:
         assert "msg" in resp2, pprint.pformat(resp1)
         assert "Ophyd-Service" in resp2["msg"]
@@ -285,7 +285,7 @@ def test_authentication_and_authorization_01(
     if token_access:
         assert "access_token" in resp3
         token = resp3["access_token"]
-        resp4 = request_to_json("get", "/ping", token=token)
+        resp4 = request_to_json("get", "/v1/ping", token=token)
         assert "msg" in resp4, pprint.pformat(resp4)
         assert "Ophyd-Service" in resp4["msg"]
     else:
@@ -303,7 +303,7 @@ def test_authentication_and_authorization_01(
     assert auth_fail_msg in resp6["detail"]
 
     # Try using invalid token
-    resp7 = request_to_json("get", "/ping", token="INVALIDTOKEN")
+    resp7 = request_to_json("get", "/v1/ping", token="INVALIDTOKEN")
     assert "detail" in resp7, pprint.pformat(resp7)
     assert "Could not validate credentials" in resp7["detail"]
 
@@ -370,7 +370,7 @@ def test_authentication_and_authorization_03(
     setup_server_with_config_file(config_file_str=config, tmpdir=tmpdir, monkeypatch=monkeypatch)
     fastapi_server_fs()
 
-    resp1 = request_to_json("get", "/ping", api_key=api_key)
+    resp1 = request_to_json("get", "/v1/ping", api_key=api_key)
     assert "msg" in resp1, pprint.pformat(resp1)
     assert "Ophyd-Service" in resp1["msg"]
 
@@ -403,7 +403,7 @@ def test_authentication_and_authorization_04(
     for params in ({}, {"api_key": None}):
         print(f"Test case: params={params}")
 
-        resp1 = request_to_json("get", "/ping", **params)
+        resp1 = request_to_json("get", "/v1/ping", **params)
         assert "msg" in resp1, pprint.pformat(resp1)
         assert "Ophyd-Service" in resp1["msg"]
 
@@ -440,7 +440,7 @@ def test_authentication_and_authorization_05(
     for params in ({}, {"api_key": None}):
         print(f"Test case: params={params}")
 
-        resp1 = request_to_json("get", "/ping", **params)
+        resp1 = request_to_json("get", "/v1/ping", **params)
         assert "msg" in resp1, pprint.pformat(resp1)
         assert "Ophyd-Service" in resp1["msg"]
 
@@ -487,7 +487,7 @@ def test_authentication_and_authorization_06(
         assert "access_token" in resp1
         token = resp1["access_token"]
 
-        resp2 = request_to_json("get", "/ping", token=token)
+        resp2 = request_to_json("get", "/v1/ping", token=token)
         assert "msg" in resp2, pprint.pformat(resp2)
         assert "Ophyd-Service" in resp2["msg"]
 
@@ -520,7 +520,7 @@ def test_authentication_and_authorization_06(
             assert resp4a["roles"] == roles_user
             assert set(resp4a["scopes"]) == scopes_user
 
-            resp5 = request_to_json("get", "/ping", api_key=api_key)
+            resp5 = request_to_json("get", "/v1/ping", api_key=api_key)
             assert "msg" in resp5, pprint.pformat(resp5)
             assert "Ophyd-Service" in resp5["msg"]
 
@@ -541,7 +541,7 @@ def test_authentication_and_authorization_06(
             assert resp6a["roles"] == roles_user
             assert set(resp6a["scopes"]) == set(new_scopes)
 
-            resp7 = request_to_json("get", "/ping", api_key=api_key2)
+            resp7 = request_to_json("get", "/v1/ping", api_key=api_key2)
             assert "msg" in resp7, pprint.pformat(resp7)
             assert "Ophyd-Service" in resp7["msg"]
 
@@ -559,7 +559,7 @@ def test_authentication_and_authorization_06(
             assert resp8a["roles"] == roles_user
             assert set(resp8a["scopes"]) == set(new_scopes)
 
-            resp9 = request_to_json("get", "/ping", api_key=api_key3)
+            resp9 = request_to_json("get", "/v1/ping", api_key=api_key3)
             assert "msg" in resp9, pprint.pformat(resp9)
             assert "Ophyd-Service" in resp9["msg"]
 
@@ -608,7 +608,7 @@ def test_authentication_and_authorization_07(
         assert "access_token" in resp1, pprint.pformat(resp1)
         token = resp1["access_token"]
 
-        resp2 = request_to_json("get", "/ping", token=token)
+        resp2 = request_to_json("get", "/v1/ping", token=token)
         assert "msg" in resp2, pprint.pformat(resp2)
         assert "Ophyd-Service" in resp2["msg"]
 
@@ -653,7 +653,7 @@ def test_authentication_and_authorization_08(
         assert "access_token" in resp1, pprint.pformat(resp1)
         token = resp1["access_token"]
 
-        resp2 = request_to_json("get", "/ping", token=token)
+        resp2 = request_to_json("get", "/v1/ping", token=token)
         assert "msg" in resp2, pprint.pformat(resp2)
         assert "Ophyd-Service" in resp2["msg"]
 
@@ -730,7 +730,7 @@ def test_resource_access_01(
     assert "access_token" in resp1, pprint.pformat(resp1)
     token = resp1["access_token"]
 
-    resp2 = request_to_json("get", "/device/read/det1", token=token)
+    resp2 = request_to_json("get", "/v1/device/read/det1", token=token)
     assert resp2["success"] is True, pprint.pformat(resp2)
     assert resp2["device_name"] == "det1", pprint.pformat(resp2)
     assert "value" in resp2, pprint.pformat(resp2)

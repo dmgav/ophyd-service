@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """
-Subscribe to the '/api/monitor' websocket of ophyd-service and print the streamed messages.
+Subscribe to the '/api/v1/monitor' websocket of ophyd-service and print the streamed messages.
 
 Usage:
-    python stream_monitor.py [--url ws://localhost:60620/api/monitor/ws] [--json] [--devices NAME ...]
+    python stream_monitor.py [--url ws://localhost:60620/api/v1/monitor/ws] [--json] [--devices NAME ...]
 
 
 pixi run python stream_monitor.py
 pixi run python stream_monitor.py --json
-pixi run python stream_monitor.py --url ws://some-host:8000/api/monitor/ws
+pixi run python stream_monitor.py --url ws://some-host:8000/api/v1/monitor/ws
 pixi run python stream_monitor.py --devices det1 motor1 motor2
 pixi run python stream_monitor.py --api-key <api-key>
 """
@@ -54,7 +54,7 @@ async def monitor(url, as_json, device_names, api_key):
 
 def main():
     parser = argparse.ArgumentParser(description="Monitor the data stream of ophyd-service.")
-    parser.add_argument("--url", default="ws://localhost:60620/api/monitor/ws", help="Websocket URL.")
+    parser.add_argument("--url", default="ws://localhost:60620/api/v1/monitor/ws", help="Websocket URL.")
     parser.add_argument(
         "--json", action="store_true", default=True, help="Print the full message as formatted JSON."
     )

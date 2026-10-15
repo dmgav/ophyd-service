@@ -35,7 +35,7 @@ from ..resources import SERVER_RESOURCES as SR  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api/v1")
 
 
 @router.get("/")
@@ -48,8 +48,9 @@ async def ping_handler(payload: dict = {}, principal=Security(get_current_princi
     return msg
 
 
-@router.get("/device/read/{device_name:path}")
+@router.get("/device/{method}/{device_name:path}")
 async def device_read_handler(
+    method: str,
     device_name: str,
     principal=Security(get_current_principal, scopes=["read:devices"]),
     settings: BaseSettings = Depends(get_settings),
@@ -71,7 +72,20 @@ async def device_read_handler(
         user_group,
         device_name,
     )
-    return {"success": True, "msg": "", "device_name": device_name, "value": {}}
+
+    if method in ("properties", "permissions"):
+        handler = SR.device_control.device_info_handler
+    else:
+        handler = SR.device_control.device_read_handler
+    result = await handler(device_name=device_name, method=method, user_group=user_group)
+
+    return {
+        "success": result["success"],
+        "err_msg": result["err_msg"],
+        "method": method,
+        "device_name": device_name,
+        "value": result["result"],
+    }
 
 
 # WebSocket close codes.  4001 = invalid token, 4401 = auth required

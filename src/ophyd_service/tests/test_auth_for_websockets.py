@@ -126,7 +126,7 @@ def test_websocket_auth_01(
     assert resp3["scopes"] == ["inherit"]
     api_key = resp3["secret"]
 
-    endpoint = "/monitor/ws"
+    endpoint = "/v1/monitor/ws"
     if ws_auth_type == "none":
         ws_params = {}
     elif ws_auth_type == "apikey":
