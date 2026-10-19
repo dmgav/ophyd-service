@@ -56,7 +56,7 @@ async def device_socket_write_handler(
 @router.websocket("/device-socket/read")
 async def device_socket_read_handler(
     websocket: WebSocket,
-    scopes=["write:devices"],
+    scopes=["read:devices"],
     resource_access_manager=Depends(get_resource_access_manager),
     settings: BaseSettings = Depends(get_settings),
     api_access_manager=Depends(get_api_access_manager),
