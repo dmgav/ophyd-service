@@ -4,12 +4,24 @@ user_groups:
       - null  # Allow all
     forbidden_devices_read:
       - ":^_:?.*"  # All devices with names starting with '_'
+    allowed_devices_write_idle:
+      - null
+    allowed_devices_write_always:
+      - null
   primary:  # Default group. The group can be renamed or other groups may be created.
     allowed_devices_read:
       - null  # Allow all
     forbidden_devices_read:
       - ":^rand_async_device4:?.*"  # rand_async_device4 and it's components
       # - "sim_stage_async.x"  # Block only 'sim_stage_async.x', not it's components.
+    allowed_devices_write_idle:
+      - null
+    allowed_devices_write_always:
+      - null
   test_user:  # Another group used for unit tests.
     allowed_devices_read:
       - null  # Allow all
+    allowed_devices_write_idle:
+      - null
+    allowed_devices_write_always:
+      - null

@@ -53,6 +53,11 @@ class SimPeriodicDevice(ophyd.Device):
 sim_periodic_device1 = SimPeriodicDevice(name="sim_periodic_device1")
 sim_periodic_device2 = SimPeriodicDevice(name="sim_periodic_device2")
 
+# def callbackValue(value, timestamp, **kwargs):
+#     print(f"{value=} {timestamp=}")
+
+# sim_periodic_device1.noise.subscribe(callbackValue, event_type="value")
+
 
 # =======================================================================================
 #                          Simulated 'ophyd-async' devices

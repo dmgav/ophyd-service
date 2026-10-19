@@ -1,12 +1,16 @@
 import asyncio
 import json
 import logging
+import time
 
+import numpy as np
 import pydantic
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from ophyd import EpicsMotor, EpicsSignal, EpicsSignalRO, PseudoPositioner
 from packaging import version
 
 from ..resources import SERVER_RESOURCES as SR
+from ..service.device_registry import DeviceAccessType
 from ..settings import get_settings
 from ..utils import get_api_access_manager, get_current_username, get_resource_access_manager
 from .core_api import _authenticate_websocket
@@ -74,17 +78,21 @@ async def device_socket_read_handler(
 
 
 async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=False):
-    import time
-
-    import numpy as np
-    from ophyd import EpicsMotor, EpicsSignal, EpicsSignalRO, PseudoPositioner
-
-    from ..service.device_registry import DeviceAccessType
 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = asyncio.get_event_loop()
+
+    # Check if device exists in the device registry
+    device_registry = SR.device_control.device_registry
+    existing_devices = device_registry.existing_devices
+    readable_devices = device_registry.allowed_devices.get(user_group, {}).get(DeviceAccessType.READ.value, {})
+    subscription_cids = {}
+
+    def can_subscribe(device_name):
+        description = existing_devices.get(device_name, {})
+        return description.get("is_subscribable", False) and device_name in readable_devices
 
     def addCallbacks(device_name, device):
         # different ophyd devices may have different event types that are subscribable
@@ -94,85 +102,120 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         # Component: 'acq_done'
         connection_state = {"connected": None, "last_update": 0}
 
-        def callbackMd(**kwargs):
-            # Triggered on changes to metadata, including 'connected'
-            # Will trigger when device first connects, when the device is disconnected/reconnected
-            # Does not trigger when the value changes
-            message = dict(kwargs)
-            message["obj"] = (
-                # obj is an EpicsSignal which is not JSON serializable, overwrite it so the msg will send
-                device_name
-            )
-            message["device"] = device_name  # to be consistent with the message from callbackValue()
-            message["signal"] = (
-                kwargs.get("obj", None).name if kwargs.get("obj", None) else None
-            )  # provides the specific signal name within the device
+        def get_callbackMd(device_name):
+            def callback(**kwargs):
+                # Triggered on changes to metadata, including 'connected'
+                # Will trigger when device first connects, when the device is disconnected/reconnected
+                # Does not trigger when the value changes
+                message = dict(kwargs)
+                message["obj"] = (
+                    # obj is an EpicsSignal which is not JSON serializable, overwrite it so the msg will send
+                    device_name
+                )
+                message["device"] = device_name  # to be consistent with the message from callbackValue()
+                message["signal"] = (
+                    kwargs.get("obj", None).name if kwargs.get("obj", None) else None
+                )  # provides the specific signal name within the device
 
-            if message.get("connected") is not None:
-                current_connection = message.get("connected")
-                # Only update connection state & send ws message if it has changed
-                if current_connection != connection_state["connected"]:
-                    # if even one signal is disconnected, always send message that device is disconnected
-                    if current_connection is False:
-                        connection_state["connected"] = current_connection
-                        connection_state["last_update"] = time.time()
-                        try:
-                            asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-                        except WebSocketDisconnect:
-                            logger.info(f"Connection closed while sending update for device: {device_name}")
-                    if current_connection is True:
-                        # TODO: verify that the all signals in device are connected
-                        #   before sending connected=true message
-                        # device.connected
-                        try:
-                            asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-                        except WebSocketDisconnect:
-                            logger.info(f"Connection closed while sending update for device: {device_name}")
+                if message.get("connected") is not None:
+                    current_connection = message.get("connected")
+                    # Only update connection state & send ws message if it has changed
+                    if current_connection != connection_state["connected"]:
+                        # if even one signal is disconnected, always send message that device is disconnected
+                        if current_connection is False:
+                            connection_state["connected"] = current_connection
+                            connection_state["last_update"] = time.time()
+                            try:
+                                asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
+                            except WebSocketDisconnect:
+                                logger.info(f"Connection closed while sending update for device: {device_name}")
+                        if current_connection is True:
+                            # TODO: verify that the all signals in device are connected
+                            #   before sending connected=true message
+                            # device.connected
+                            try:
+                                asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
+                            except WebSocketDisconnect:
+                                logger.info(f"Connection closed while sending update for device: {device_name}")
 
-        def callbackValue(value, timestamp, **kwargs):
-            if isinstance(value, np.ndarray) and value.dtype.kind in ["i", "u"]:
+            return callback
+
+        def get_callbackValue(device_name):
+            def callback(value, timestamp, **kwargs):
+                if isinstance(value, np.ndarray) and value.dtype.kind in ["i", "u"]:
+                    try:
+                        # Remove null bytes and convert to string
+                        cleaned_array = value[value != 0]  # Remove null terminators
+                        if len(cleaned_array) > 0:
+                            string_value = "".join(chr(x) for x in cleaned_array)
+                            value = string_value
+                            logger.debug(f"Converted array to string for device {device_name}: {value}")
+                    except (ValueError, OverflowError):
+                        # If conversion fails, keep original value
+                        pass
+                if isinstance(value, tuple):
+                    value = value[0]
+                message = dict(kwargs)
+                message = {
+                    "device": device_name,
+                    "value": value,
+                    "timestamp": timestamp,
+                    "connected": device.connected,  # might take this out since redundant with meta
+                    "read_access": getattr(device, "read_access", None),
+                    "write_access": getattr(device, "write_access", None),
+                    "signal": kwargs.get("obj", None).name if kwargs.get("obj", None) else None,
+                }
                 try:
-                    # Remove null bytes and convert to string
-                    cleaned_array = value[value != 0]  # Remove null terminators
-                    if len(cleaned_array) > 0:
-                        string_value = "".join(chr(x) for x in cleaned_array)
-                        value = string_value
-                        logger.debug(f"Converted array to string for device {device_name}: {value}")
-                except (ValueError, OverflowError):
-                    # If conversion fails, keep original value
-                    pass
-            if isinstance(value, tuple):
-                value = value[0]
-            message = dict(kwargs)
-            message = {
-                "device": device_name,
-                "value": value,
-                "timestamp": timestamp,
-                "connected": device.connected,  # might take this out since redundant with meta
-                "read_access": getattr(device, "read_access", None),
-                "write_access": getattr(device, "write_access", None),
-                "signal": kwargs.get("obj", None).name if kwargs.get("obj", None) else None,
-            }
-            try:
-                asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-            except WebSocketDisconnect:
-                logger.info(f"Connection closed while sending update for device: {device_name}")
+                    asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
+                except WebSocketDisconnect:
+                    logger.info(f"Connection closed while sending update for device: {device_name}")
 
-        def recursively_subscribe(device, name=None, parent=None):
+            return callback
+
+        def recursively_subscribe(device, device_name):
+            """
+            Subscribe callbacks to the device or, for devices of unsupported types, to its components.
+            Subscription is skipped if the device is not subscribable or the user group has no
+            READ access to the device. Component names are taken from the flattened list of
+            existing devices.
+
+            Parameters
+            ----------
+            device: object
+                Reference to the device object.
+            device_name: str
+                Full device name, e.g. ``'device.component.subcomponent'``.
+            """
+            subscription_allowed = can_subscribe(device_name)
+            if subscription_allowed:
+                logger.info(f"Subscribing to the device {device_name!r}")
+            cids = subscription_cids.setdefault(device_name, set())
+
             if isinstance(device, (EpicsSignal, EpicsSignalRO)):
-                device.subscribe(callbackMd, event_type="meta")
-                device.subscribe(callbackValue, event_type="value")
+                if subscription_allowed:
+                    cids.add(device.subscribe(get_callbackMd(device_name), event_type="meta"))
+                    cids.add(device.subscribe(get_callbackValue(device_name), event_type="value"))
             elif isinstance(device, EpicsMotor):
-                device.subscribe(callbackValue, event_type="readback")
-                for signal in device.walk_signals():
-                    signal.item.subscribe(callbackMd, event_type="meta")
+                if subscription_allowed:
+                    cids.add(device.subscribe(get_callbackValue(device_name), event_type="readback"))
+                    for signal in device.walk_signals():
+                        signal_cids = subscription_cids.setdefault(f"{device_name}.{signal.dotted_name}", set())
+                        signal_cids.add(signal.item.subscribe(get_callbackMd(device_name), event_type="meta"))
             elif isinstance(device, PseudoPositioner):
-                device.subscribe(callbackValue, event_type="readback")
+                if subscription_allowed:
+                    cids.add(device.subscribe(get_callbackValue(device_name), event_type="readback"))
             else:
-                for name in device.component_names:
-                    recursively_subscribe(getattr(device, name))
+                if subscription_allowed:
+                    print(f"{device.event_types=}")
+                    for etype in device.event_types:
+                        if etype == "meta":
+                            cids.add(device.subscribe(get_callbackMd(device_name), event_type="meta"))
+                        elif etype == "value":
+                            cids.add(device.subscribe(get_callbackValue(device_name), event_type="value"))
+                for name in existing_devices.get(device_name, {}).get("components", []):
+                    recursively_subscribe(getattr(device, name), f"{device_name}.{name}")
 
-        recursively_subscribe(device)
+        recursively_subscribe(device, device_name)
 
         subscriptions[device_name] = device
 
@@ -188,8 +231,6 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             await websocket.send_json({"message": f"Already subscribed to {device_name}"})
             return
 
-        # Check if device exists in the device registry
-        device_registry = SR.device_control.device_registry
         try:
             device, _ = device_registry.get_device(
                 device_name, user_group=user_group, access_type=DeviceAccessType.READ
@@ -252,7 +293,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
         try:
             # This also checks if the user has write permissions to the device.
-            device, _ = SR.device_control.device_registry.get_device(
+            device, _ = device_registry.get_device(
                 device_name, user_group=user_group, access_type=DeviceAccessType.WRITE_ALWAYS
             )
         except RuntimeError as ex:
@@ -311,6 +352,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         await websocket.send_json({"message": f"Successfully set {device_name} to {value}"})
 
     subscriptions = {}
+    supported_actions = ("subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set")
 
     try:
         while True:
@@ -318,20 +360,12 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             try:
                 data = json.loads(message)
                 action = data.get("action")
-                if (
-                    action != "subscribe"
-                    and action != "unsubscribe"
-                    and action != "refresh"
-                    and action != "subscribeSafely"
-                    and action != "subscribeReadOnly"
-                    and action != "set"
-                ):
+                if action not in supported_actions:
                     await websocket.send_json(
                         {
                             "error": (
-                                f"Received action: {action}, actions must be 'subscribe', "
-                                "'unsubscribe', 'refresh', "
-                                "'subscribeSafely', 'subscribeReadOnly', or 'set'. "
+                                f"Received action: {action}, actions must be one of: "
+                                f"{', '.join(repr(_) for _ in supported_actions)}. "
                                 "Example msg: {action: 'subscribe', device: 'motor1'}"
                             )
                         }
@@ -340,31 +374,20 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
                 if read_only and action == "set":
                     await websocket.send_json({"error": "Setting values is not allowed on a read-only connection"})
-                    continue
-
-                if action == "subscribe":
+                elif action == "subscribe":
                     await handleSubscribe(data)
-                    continue
-
-                if action == "subscribeSafely":
+                elif action == "subscribeSafely":
                     await handleSubscribe(data, requireConnection=True)
-                    continue
-
-                if action == "subscribeReadOnly":
+                elif action == "subscribeReadOnly":
                     await handleSubscribe(data, requireConnection=False, readOnly=True)
-                    continue
-
-                if action == "unsubscribe":
+                elif action == "unsubscribe":
                     await handleUnsubscribe(data)
-                    continue
-
-                if action == "refresh":
+                elif action == "refresh":
                     await handleRefresh()
-                    continue
-
-                if action == "set":
+                elif action == "set":
                     await handleSet(data)
-                    continue
+                else:
+                    raise RuntimeError(f"Action {action!r} was not handled")
 
             except json.JSONDecodeError:
                 await websocket.send_json({"error": "Invalid JSON format"})
