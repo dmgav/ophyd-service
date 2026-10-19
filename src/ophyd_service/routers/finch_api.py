@@ -376,8 +376,9 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             return
 
         if not isinstance(device, PseudoPositioner) and isinstance(value, (int, float)):
-            low_limit = device.low_limit
-            high_limit = device.high_limit
+            # Some devices (e.g. simulated 'SynAxis') do not define limits.
+            low_limit = getattr(device, "low_limit", None)
+            high_limit = getattr(device, "high_limit", None)
 
             if (low_limit is not None and value < low_limit) or (high_limit is not None and value > high_limit):
                 # area detector limits have a low limit === high limit by default.
@@ -391,11 +392,13 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
         try:
             if isinstance(value, str):
-                device.put(value, wait=True, timeout=timeout, use_complete=True)
+                await SR.device_control.device_put_handler(
+                    device_name, device, value, timeout=timeout, use_complete=True
+                )
             else:
-                device.set(value).wait(timeout=timeout)
+                await SR.device_control.device_set_handler(device_name, device, value, timeout=timeout)
         except Exception as error:
-            await websocket.send_json({"error": f"Could not set value of {device_name} to {value}: {str(error)}"})
+            await websocket.send_json({"error": f"Failed to set value of {device_name} to {value}: {str(error)}"})
             return
 
         await websocket.send_json({"message": f"Successfully set {device_name} to {value}"})

@@ -4,14 +4,20 @@ Subscribe to devices using the '/api/v1/device-socket' websocket of ophyd-servic
 
 Usage:
     python stream_monitor_finch.py [--url ws://localhost:60620/api/v1/device-socket] [--json]
-                                   [--action subscribe|subscribeSafely|subscribeReadOnly]
-                                   [--recursive true|false] [--api-key KEY] --devices NAME ...
+                                   [--action subscribe|subscribeSafely|subscribeReadOnly|set|refresh]
+                                   [--value VALUE] [--timeout SEC] [--recursive true|false]
+                                   [--api-key KEY] --devices NAME ...
+
+The actions 'set' and 'refresh' subscribe to the devices (using 'subscribe' action) before
+sending the request.
 
 
 pixi run python stream_monitor_finch.py --devices det1 motor1
 pixi run python stream_monitor_finch.py --devices det1 --json
 pixi run python stream_monitor_finch.py --devices det1 --action subscribeSafely
 pixi run python stream_monitor_finch.py --devices det1 --recursive false
+pixi run python stream_monitor_finch.py --devices det1 --action refresh
+pixi run python stream_monitor_finch.py --devices motor1 --action set --value 2.5 --timeout 5
 pixi run python stream_monitor_finch.py --devices det1 --url ws://localhost:60620/api/v1/device-socket/read
 pixi run python stream_monitor_finch.py --devices det1 --api-key <api-key>
 """
@@ -62,16 +68,30 @@ def format_msg(msg):
     return json.dumps(msg)
 
 
-async def monitor(url, as_json, device_names, action, recursive, api_key):
+async def monitor(url, as_json, device_names, action, recursive, api_key, *, value, timeout):
     # The key is passed in the header, so that it is not exposed in the URL.
     headers = {"Authorization": f"ApiKey {api_key}"} if api_key else {}
+    subscribe_action = "subscribe" if action in ("set", "refresh") else action
+    # The value is set only once, not after each reconnect.
+    set_pending = action == "set"
     while True:
         try:
             async with websockets.connect(url, additional_headers=headers) as ws:
                 print(f"Connected to {url}")
                 for name in device_names:
-                    print(f"Subscribing to the device {name!r} ({action}, recursive={recursive}) ...")
-                    await ws.send(json.dumps({"action": action, "device": name, "recursive": recursive}))
+                    print(f"Subscribing to the device {name!r} ({subscribe_action}, recursive={recursive}) ...")
+                    await ws.send(json.dumps({"action": subscribe_action, "device": name, "recursive": recursive}))
+                if set_pending:
+                    for name in device_names:
+                        request = {"action": "set", "device": name, "value": value}
+                        if timeout is not None:
+                            request["timeout"] = timeout
+                        print(f"Setting the device {name!r} to {value!r} ...")
+                        await ws.send(json.dumps(request))
+                    set_pending = False
+                elif action == "refresh":
+                    print("Refreshing the devices ...")
+                    await ws.send(json.dumps({"action": "refresh"}))
                 async for message in ws:
                     msg = json.loads(message)
                     if as_json:
@@ -95,8 +115,11 @@ def main():
     parser.add_argument(
         "--action",
         default="subscribe",
-        choices=["subscribe", "subscribeSafely", "subscribeReadOnly"],
-        help="Action used to subscribe to the devices. 'subscribeSafely' fails if the device is not connected.",
+        choices=["subscribe", "subscribeSafely", "subscribeReadOnly", "set", "refresh"],
+        help=(
+            "Action sent for the devices. 'subscribeSafely' fails if the device is not connected. "
+            "'set' and 'refresh' subscribe to the devices first using 'subscribe'."
+        ),
     )
     parser.add_argument(
         "--recursive",
@@ -106,15 +129,31 @@ def main():
         help="Subscribe to the device components recursively.",
     )
     parser.add_argument(
+        "--value", help="Value used with 'set' action. Numeric strings are converted by the server."
+    )
+    parser.add_argument("--timeout", type=float, default=None, help="Timeout (seconds) used with 'set' action.")
+    parser.add_argument(
         "--api-key",
         default="",
         help="API key used to authenticate.",
     )
     args = parser.parse_args()
 
+    if args.action == "set" and args.value is None:
+        parser.error("'set' action requires --value")
+
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(
-            monitor(args.url, args.json, args.devices, args.action, args.recursive == "true", args.api_key)
+            monitor(
+                args.url,
+                args.json,
+                args.devices,
+                args.action,
+                args.recursive == "true",
+                args.api_key,
+                value=args.value,
+                timeout=args.timeout,
+            )
         )
 
 

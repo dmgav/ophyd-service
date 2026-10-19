@@ -128,3 +128,54 @@ class DeviceControl:
             success, err_msg = False, f"Error: {ex}"
 
         return {"success": success, "err_msg": err_msg, "result": value}
+
+    async def device_put_handler(self, device_name, device, value, *, timeout, use_complete=False):
+        """
+        Call ``put()`` method of the device in a separate thread. Exceptions raised
+        by ``put()`` are reraised.
+
+        Parameters
+        ----------
+        device_name: str
+            Full device name, e.g. ``'device.component.subcomponent'``.
+        device: object
+            Reference to the device object.
+        value: any
+            The value to write.
+        timeout: float
+            Timeout for the put operation.
+        use_complete: bool
+            Wait for put completion (EPICS signals only).
+        """
+        logger.debug("Writing value %r to the device '%s' (put) ...", value, device_name)
+
+        # Soft signals warn about unsupported kwargs, so pass EPICS-specific kwargs only if accepted.
+        kwargs = {}
+        if "use_complete" in inspect.signature(device.put).parameters:
+            kwargs.update({"use_complete": use_complete, "wait": use_complete})
+
+        await asyncio.to_thread(device.put, value, timeout=timeout, **kwargs)
+
+    async def device_set_handler(self, device_name, device, value, *, timeout):
+        """
+        Call ``set()`` method of the device in a separate thread and wait for the returned
+        status object to complete. Exceptions raised by ``set()`` or by the status object
+        (including the timeout) are reraised.
+
+        Parameters
+        ----------
+        device_name: str
+            Full device name, e.g. ``'device.component.subcomponent'``.
+        device: object
+            Reference to the device object.
+        value: any
+            The value to set.
+        timeout: float
+            Maximum time to wait for the status object to complete.
+        """
+        logger.debug("Setting value %r of the device '%s' (set) ...", value, device_name)
+
+        def _set():
+            device.set(value).wait(timeout=timeout)
+
+        await asyncio.to_thread(_set)
