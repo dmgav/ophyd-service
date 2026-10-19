@@ -88,13 +88,14 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
     device_registry = SR.device_control.device_registry
     existing_devices = device_registry.existing_devices
     readable_devices = device_registry.allowed_devices.get(user_group, {}).get(DeviceAccessType.READ.value, {})
-    subscription_cids = {}
+    subscriptions = {}
+    supported_actions = ("subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set")
 
     def can_subscribe(device_name):
         description = existing_devices.get(device_name, {})
         return description.get("is_subscribable", False) and device_name in readable_devices
 
-    def addCallbacks(device_name, device):
+    def addCallbacks(device_name, device, *, recursive=True, readOnly=False):
         # different ophyd devices may have different event types that are subscribable
         # EpicsSignal: 'setpoint_meta', 'setpoint', 'meta', 'value'
         # EpicsMotor: 'start_moving', 'readback', '_req_done', 'done_moving', 'acq_done'
@@ -172,7 +173,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
             return callback
 
-        def recursively_subscribe(device, device_name):
+        def recursively_subscribe(device, device_name, *, top_level=True):
             """
             Subscribe callbacks to the device or, for devices of unsupported types, to its components.
             Subscription is skipped if the device is not subscribable or the user group has no
@@ -185,43 +186,60 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 Reference to the device object.
             device_name: str
                 Full device name, e.g. ``'device.component.subcomponent'``.
+            top_level: bool
+                ``True`` if the device is the top-level element of the subscription.
             """
-            subscription_allowed = can_subscribe(device_name)
+            is_subscribed = device_name in subscriptions
+            if not is_subscribed:
+                subscriptions[device_name] = {
+                    "device": device,
+                    "recursive": recursive and top_level,
+                    "read_only": readOnly,
+                    "cids": [],
+                }
+            cids = subscriptions[device_name]["cids"]
+
+            subscription_allowed = not is_subscribed and can_subscribe(device_name)
             if subscription_allowed:
-                logger.info(f"Subscribing to the device {device_name!r}")
-            cids = subscription_cids.setdefault(device_name, set())
+                logger.debug(f"Subscribing to the device {device_name!r}")
 
             if isinstance(device, (EpicsSignal, EpicsSignalRO)):
                 if subscription_allowed:
-                    cids.add(device.subscribe(get_callbackMd(device_name), event_type="meta"))
-                    cids.add(device.subscribe(get_callbackValue(device_name), event_type="value"))
+                    cids.append(device.subscribe(get_callbackMd(device_name), event_type="meta"))
+                    cids.append(device.subscribe(get_callbackValue(device_name), event_type="value"))
             elif isinstance(device, EpicsMotor):
                 if subscription_allowed:
-                    cids.add(device.subscribe(get_callbackValue(device_name), event_type="readback"))
+                    cids.append(device.subscribe(get_callbackValue(device_name), event_type="readback"))
                     for signal in device.walk_signals():
-                        signal_cids = subscription_cids.setdefault(f"{device_name}.{signal.dotted_name}", set())
-                        signal_cids.add(signal.item.subscribe(get_callbackMd(device_name), event_type="meta"))
+                        signal_name = f"{device_name}.{signal.dotted_name}"
+                        if signal_name not in subscriptions:
+                            cid = signal.item.subscribe(get_callbackMd(device_name), event_type="meta")
+                            subscriptions[signal_name] = {
+                                "device": signal.item,
+                                "recursive": False,
+                                "read_only": readOnly,
+                                "cids": [cid],
+                            }
             elif isinstance(device, PseudoPositioner):
                 if subscription_allowed:
-                    cids.add(device.subscribe(get_callbackValue(device_name), event_type="readback"))
+                    cids.append(device.subscribe(get_callbackValue(device_name), event_type="readback"))
             else:
                 if subscription_allowed:
-                    print(f"{device.event_types=}")
                     for etype in device.event_types:
                         if etype == "meta":
-                            cids.add(device.subscribe(get_callbackMd(device_name), event_type="meta"))
+                            cids.append(device.subscribe(get_callbackMd(device_name), event_type="meta"))
                         elif etype == "value":
-                            cids.add(device.subscribe(get_callbackValue(device_name), event_type="value"))
-                for name in existing_devices.get(device_name, {}).get("components", []):
-                    recursively_subscribe(getattr(device, name), f"{device_name}.{name}")
+                            cids.append(device.subscribe(get_callbackValue(device_name), event_type="value"))
+                if recursive:
+                    for name in existing_devices.get(device_name, {}).get("components", []):
+                        recursively_subscribe(getattr(device, name), f"{device_name}.{name}", top_level=False)
 
         recursively_subscribe(device, device_name)
-
-        subscriptions[device_name] = device
 
     async def handleSubscribe(data, requireConnection=False, readOnly=False):
         # allows user to subscribe to any device from the device registry
         device_name = data.get("device")
+        recursive = bool(data.get("recursive", True))
 
         if not device_name:
             await websocket.send_json({"error": "No device name specified"})
@@ -252,58 +270,96 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 return
             await websocket.send_json({"connected": False, "device": device_name})
 
-        addCallbacks(device_name, device)
-        subscriptions[device_name] = device
+        addCallbacks(device_name, device, recursive=recursive, readOnly=readOnly)
 
         await websocket.send_json({"message": f"Subscribed to device {device_name}"})
-        return
 
     async def handleUnsubscribe(data):
         device_name = data.get("device")
+
         if not device_name:
             await websocket.send_json({"error": "No device name specified"})
             return
 
-        if device_name in subscriptions:
-            subscriptions[device_name]._reset_sub(event_type="meta")
-            subscriptions[device_name]._reset_sub(event_type="value")
-            del subscriptions[device_name]
-            await websocket.send_json({"message": f"Unsubscribed from {device_name}"})
-        else:
+        if device_name not in subscriptions:
             await websocket.send_json({"message": f"Not subscribed to {device_name}"})
-        return
+            return
+
+        names = [device_name]
+        if subscriptions[device_name]["recursive"]:
+            prefix = f"{device_name}."
+            names.extend(_ for _ in subscriptions if _.startswith(prefix))
+
+        for name in names:
+            try:
+                info = subscriptions.pop(name)
+                for cid in info["cids"]:
+                    info["device"].unsubscribe(cid)
+            except Exception as ex:
+                logger.warning(f"Failed to unsubscribe from {name!r}: {ex}")
+
+        await websocket.send_json({"message": f"Unsubscribed from {device_name}"})
+
+    def unsubscribe_all():
+        for name, info in subscriptions.items():
+            for cid in info["cids"]:
+                try:
+                    info["device"].unsubscribe(cid)
+                except Exception as ex:
+                    logger.warning(f"Failed to unsubscribe from {name!r}: {ex}")
+        subscriptions.clear()
 
     async def handleRefresh():
-        for device_name, _ in subscriptions.items():
-            # device.get()
-            subscriptions[device_name].get()
+        for info in subscriptions.values():
+            try:
+                info["device"].get()
+            except Exception:
+                pass
+
         await websocket.send_json({"message": "Refreshed all devices"})
-        return
 
     async def handleSet(data):
         device_name = data.get("device")
+
         if not device_name:
             await websocket.send_json({"error": "No device name specified"})
             return
+
         if device_name not in subscriptions:
             await websocket.send_json(
                 {"error": f"Device {device_name} is not subscribed. Subscribe to device before setting value."}
             )
             return
 
-        try:
-            # This also checks if the user has write permissions to the device.
-            device, _ = device_registry.get_device(
-                device_name, user_group=user_group, access_type=DeviceAccessType.WRITE_ALWAYS
+        if subscriptions[device_name]["read_only"]:
+            await websocket.send_json(
+                {"error": f"Cannot set value of {device_name!r}: the device is subscribed as read-only"}
             )
-        except RuntimeError as ex:
-            await websocket.send_json({"error": f"Cannot set value of {device_name}: {ex}"})
             return
 
-        if device is not subscriptions[device_name]:
-            msg = f"Cannot set value of {device_name}: subscribed device does not match the device registry"
-            await websocket.send_json({"error": msg})
+        timeout = data.get("timeout", 1)  # default 1 second timeout
+        if not isinstance(timeout, (int, float)):
+            await websocket.send_json(
+                {"error": f"Timeout must be a number. Could not set value of {device_name!r}"}
+            )
             return
+
+        try:
+            permissions = device_registry.get_device_permissions(device_name, user_group=user_group)
+        except RuntimeError as ex:
+            await websocket.send_json({"error": f"Failed to set the value of {device_name!r}: {ex}"})
+            return
+
+        # TODO: this code will need to be reworked when the status of Queue Server becomes available
+        write_always = permissions[DeviceAccessType.WRITE_ALWAYS.value]
+        write_idle = permissions[DeviceAccessType.WRITE_IDLE.value]
+        if not (write_always or write_idle):
+            await websocket.send_json(
+                {"error": f"Cannot set value of {device_name!r}: write access is not allowed"}
+            )
+            return
+
+        device = subscriptions[device_name]["device"]
 
         value = data.get("value")
         try:
@@ -315,14 +371,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             # If it's already a string, int, or float, keep it as-is
         except ValueError:
             await websocket.send_json(
-                {"error": f"Value must be a number. Could not set value of {device_name} to {value}"}
-            )
-            return
-
-        timeout = data.get("timeout", 1)  # default 1 second timeout
-        if not isinstance(timeout, (int, float)):
-            await websocket.send_json(
-                {"error": f"Timeout must be a number. Could not set value of {device_name} to {value}"}
+                {"error": f"Value must be a number. Could not set value of {device_name!r} to {value}"}
             )
             return
 
@@ -350,9 +399,6 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             return
 
         await websocket.send_json({"message": f"Successfully set {device_name} to {value}"})
-
-    subscriptions = {}
-    supported_actions = ("subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set")
 
     try:
         while True:
@@ -395,7 +441,10 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             except Exception as e:
                 await websocket.send_json({"error": f"Unexpected error: {str(e)}"})
                 logger.error(f"Unexpected error: {str(e)}")
+    except WebSocketDisconnect as ex:
+        logger.info(f"WebSocket disconnected (code={ex.code})")
     except Exception as e:
         logger.error(f"Error in websocket loop: {str(e)}")
     finally:
+        unsubscribe_all()
         logger.info("WebSocket connection closed.")

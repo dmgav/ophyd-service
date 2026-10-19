@@ -5,12 +5,13 @@ Subscribe to devices using the '/api/v1/device-socket' websocket of ophyd-servic
 Usage:
     python stream_monitor_finch.py [--url ws://localhost:60620/api/v1/device-socket] [--json]
                                    [--action subscribe|subscribeSafely|subscribeReadOnly]
-                                   [--api-key KEY] --devices NAME ...
+                                   [--recursive true|false] [--api-key KEY] --devices NAME ...
 
 
 pixi run python stream_monitor_finch.py --devices det1 motor1
 pixi run python stream_monitor_finch.py --devices det1 --json
 pixi run python stream_monitor_finch.py --devices det1 --action subscribeSafely
+pixi run python stream_monitor_finch.py --devices det1 --recursive false
 pixi run python stream_monitor_finch.py --devices det1 --url ws://localhost:60620/api/v1/device-socket/read
 pixi run python stream_monitor_finch.py --devices det1 --api-key <api-key>
 """
@@ -61,7 +62,7 @@ def format_msg(msg):
     return json.dumps(msg)
 
 
-async def monitor(url, as_json, device_names, action, api_key):
+async def monitor(url, as_json, device_names, action, recursive, api_key):
     # The key is passed in the header, so that it is not exposed in the URL.
     headers = {"Authorization": f"ApiKey {api_key}"} if api_key else {}
     while True:
@@ -69,8 +70,8 @@ async def monitor(url, as_json, device_names, action, api_key):
             async with websockets.connect(url, additional_headers=headers) as ws:
                 print(f"Connected to {url}")
                 for name in device_names:
-                    print(f"Subscribing to the device {name!r} ({action}) ...")
-                    await ws.send(json.dumps({"action": action, "device": name}))
+                    print(f"Subscribing to the device {name!r} ({action}, recursive={recursive}) ...")
+                    await ws.send(json.dumps({"action": action, "device": name, "recursive": recursive}))
                 async for message in ws:
                     msg = json.loads(message)
                     if as_json:
@@ -98,6 +99,13 @@ def main():
         help="Action used to subscribe to the devices. 'subscribeSafely' fails if the device is not connected.",
     )
     parser.add_argument(
+        "--recursive",
+        default="true",
+        type=str.lower,
+        choices=["true", "false"],
+        help="Subscribe to the device components recursively.",
+    )
+    parser.add_argument(
         "--api-key",
         default="",
         help="API key used to authenticate.",
@@ -105,7 +113,9 @@ def main():
     args = parser.parse_args()
 
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(monitor(args.url, args.json, args.devices, args.action, args.api_key))
+        asyncio.run(
+            monitor(args.url, args.json, args.devices, args.action, args.recursive == "true", args.api_key)
+        )
 
 
 if __name__ == "__main__":

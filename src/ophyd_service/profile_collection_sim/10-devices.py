@@ -21,6 +21,8 @@ from ophyd_async.sim import PatternGenerator, SimPointDetector, SimStage
 
 # Load simulated ophyd devices (det1, motor1, ...) into the global namespace.
 globals().update(vars(hw()))
+rand.start_simulation()
+rand2.start_simulation()
 
 # =======================================================================================
 #                  Simulated device with periodically updated readings
@@ -48,6 +50,11 @@ class SimPeriodicDevice(ophyd.Device):
         period_jitter=0,
         labels={"detectors"},
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.noise.start_simulation()
+        self.sine.start_simulation()
 
 
 sim_periodic_device1 = SimPeriodicDevice(name="sim_periodic_device1")
