@@ -337,8 +337,8 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             )
             return
 
-        timeout = data.get("timeout", 1)  # default 1 second timeout
-        if not isinstance(timeout, (int, float)):
+        timeout = data.get("timeout", None)  # Use default if the value is None
+        if not isinstance(timeout, int | float | None):
             await websocket.send_json(
                 {"error": f"Timeout must be a number. Could not set value of {device_name!r}"}
             )

@@ -4,6 +4,8 @@ import json
 import logging
 import re
 
+from ophyd_async.core import SignalW
+
 from .device_registry import DeviceAccessType, DeviceRegistry
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,8 @@ class DeviceControl:
     """
 
     def __init__(self, device_registry: DeviceRegistry):
+        self._timeout_default = 1
+        self._connection_timeout_default = 1
         self._device_registry = device_registry
 
     @property
@@ -129,10 +133,11 @@ class DeviceControl:
 
         return {"success": success, "err_msg": err_msg, "result": value}
 
-    async def device_put_handler(self, device_name, device, value, *, timeout, use_complete=False):
+    async def device_put_handler(self, device_name, device, value, *, timeout=None, use_complete=False):
         """
-        Call ``put()`` method of the device in a separate thread. Exceptions raised
-        by ``put()`` are reraised.
+        Write the value to the device. For Ophyd devices, ``put()`` is called in a separate thread.
+        For ophyd-async signals, ``set()`` is awaited (ophyd-async has no ``put()``). Exceptions
+        are reraised.
 
         Parameters
         ----------
@@ -142,25 +147,37 @@ class DeviceControl:
             Reference to the device object.
         value: any
             The value to write.
-        timeout: float
-            Timeout for the put operation.
+        timeout: float or None
+            Timeout for the put operation. If ``None``, the default timeout is used.
         use_complete: bool
-            Wait for put completion (EPICS signals only).
+            Wait for put completion (Ophyd EPICS signals only). Ignored for ophyd-async signals.
         """
         logger.debug("Writing value %r to the device '%s' (put) ...", value, device_name)
 
+        if timeout is None:
+            timeout = self._timeout_default
+
+        if isinstance(device, SignalW):
+            await device.set(value, timeout=timeout)
+            return
+
+        put_method = getattr(device, "put", None)
+        if not callable(put_method):
+            raise RuntimeError(f"Device {device_name!r} does not support 'put' operation")
+
         # Soft signals warn about unsupported kwargs, so pass EPICS-specific kwargs only if accepted.
         kwargs = {}
-        if "use_complete" in inspect.signature(device.put).parameters:
+        if "use_complete" in inspect.signature(put_method).parameters:
             kwargs.update({"use_complete": use_complete, "wait": use_complete})
 
-        await asyncio.to_thread(device.put, value, timeout=timeout, **kwargs)
+        await asyncio.to_thread(put_method, value, timeout=timeout, **kwargs)
 
-    async def device_set_handler(self, device_name, device, value, *, timeout):
+    async def device_set_handler(self, device_name, device, value, *, timeout=None):
         """
-        Call ``set()`` method of the device in a separate thread and wait for the returned
-        status object to complete. Exceptions raised by ``set()`` or by the status object
-        (including the timeout) are reraised.
+        Call ``set()`` method of the device and wait for the returned status object to complete.
+        For Ophyd devices, ``set()`` is called in a separate thread. For ophyd-async devices,
+        ``set()`` is called in the event loop. Exceptions raised by ``set()`` or by the status
+        object (including the timeout) are reraised. The operation is not cancelled on timeout.
 
         Parameters
         ----------
@@ -170,12 +187,29 @@ class DeviceControl:
             Reference to the device object.
         value: any
             The value to set.
-        timeout: float
-            Maximum time to wait for the status object to complete.
+        timeout: float or None
+            Maximum time to wait for the status object to complete. If ``None``, the default
+            timeout is used.
         """
         logger.debug("Setting value %r of the device '%s' (set) ...", value, device_name)
 
-        def _set():
-            device.set(value).wait(timeout=timeout)
+        if timeout is None:
+            timeout = self._timeout_default
 
-        await asyncio.to_thread(_set)
+        set_method = getattr(device, "set", None)
+        if not callable(set_method):
+            raise RuntimeError(f"Device {device_name!r} does not support 'set' operation")
+
+        # ophyd-async wraps the coroutine 'set' with 'AsyncStatus.wrap', so check the unwrapped function.
+        if inspect.iscoroutinefunction(inspect.unwrap(set_method)):
+            status = asyncio.ensure_future(set_method(value))
+            try:
+                await asyncio.wait_for(asyncio.shield(status), timeout=timeout)
+            except asyncio.TimeoutError as ex:
+                raise TimeoutError(f"Set operation for {device_name!r} timed out after {timeout} s") from ex
+        else:
+
+            def _set():
+                set_method(value).wait(timeout=timeout)
+
+            await asyncio.to_thread(_set)
