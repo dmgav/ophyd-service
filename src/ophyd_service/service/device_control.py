@@ -19,10 +19,13 @@ class DeviceControl:
     ----------
     device_registry: DeviceRegistry
         Registry holding the devices of the ophyd environment.
+    default_timeout: float
+        The default timeout used for all methods.
     """
 
-    def __init__(self, device_registry: DeviceRegistry):
+    def __init__(self, device_registry: DeviceRegistry, default_timeout: float = 10.0):
         self._device_registry = device_registry
+        self._default_timeout = default_timeout
 
     @property
     def device_registry(self):
@@ -119,7 +122,10 @@ class DeviceControl:
                 raise RuntimeError(f"Unknown method {method!r}")
 
             if read_task is not None:
-                value = await read_task
+                try:
+                    value = await asyncio.wait_for(read_task, timeout=self._default_timeout)
+                except asyncio.TimeoutError:
+                    raise TimeoutError(f"Device {device_name!r}, timed out after {self._default_timeout}s")
             json.dumps(value)
 
             success, err_msg = True, ""
