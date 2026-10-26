@@ -244,7 +244,11 @@ are processed one at a time in the order they are received.
 ``refresh``
     Call ``get()`` for all subscribed devices (e.g. to reconnect EPICS devices)::
 
-        {"action": "refresh"}
+        {"action": "refresh", "timeout": 5}
+
+    ``timeout`` (optional) is the maximum time in seconds to wait for each device. Devices that
+    fail or time out are skipped. If ``timeout`` is not specified, the default timeouts of the
+    devices are used.
 
 ``set``
     Set the value of the subscribed device::

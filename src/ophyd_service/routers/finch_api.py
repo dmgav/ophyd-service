@@ -7,6 +7,7 @@ import numpy as np
 import pydantic
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from ophyd import EpicsMotor, EpicsSignal, EpicsSignalRO, PseudoPositioner
+from ophyd_async.core import SignalW
 from packaging import version
 
 from ..resources import SERVER_RESOURCES as SR
@@ -95,6 +96,10 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         description = existing_devices.get(device_name, {})
         return description.get("is_subscribable", False) and device_name in readable_devices
 
+    def is_async(device_name):
+        description = existing_devices.get(device_name, {})
+        return bool(description.get("is_async", False))
+
     def addCallbacks(device_name, device, *, recursive=True, readOnly=False):
         # different ophyd devices may have different event types that are subscribable
         # EpicsSignal: 'setpoint_meta', 'setpoint', 'meta', 'value'
@@ -102,8 +107,9 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         # PseudoPositioner: 'start_moving', 'readback', '_req_done', 'done_moving', 'acq_done', 'readback'
         # Component: 'acq_done'
         connection_state = {"connected": None, "last_update": 0}
+        device_name_top = device_name
 
-        def get_callbackMd(device_name):
+        def get_callbackMd(device_name, device_name_top):
             def callback(**kwargs):
                 # Triggered on changes to metadata, including 'connected'
                 # Will trigger when device first connects, when the device is disconnected/reconnected
@@ -113,7 +119,11 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     # obj is an EpicsSignal which is not JSON serializable, overwrite it so the msg will send
                     device_name
                 )
-                message["device"] = device_name  # to be consistent with the message from callbackValue()
+                # Return device or component name
+                message["device_name"] = device_name
+                # Return the name of the top level device used for recursive subscription
+                #   (consistent with original behavior of ophyd-websocket)
+                message["device"] = device_name_top
                 message["signal"] = (
                     kwargs.get("obj", None).name if kwargs.get("obj", None) else None
                 )  # provides the specific signal name within the device
@@ -141,7 +151,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
             return callback
 
-        def get_callbackValue(device_name):
+        def get_callbackValue(device_name, device_name_top):
             def callback(value, timestamp, **kwargs):
                 if isinstance(value, np.ndarray) and value.dtype.kind in ["i", "u"]:
                     try:
@@ -158,7 +168,8 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     value = value[0]
                 message = dict(kwargs)
                 message = {
-                    "device": device_name,
+                    "device_name": device_name,
+                    "device": device_name_top,
                     "value": value,
                     "timestamp": timestamp,
                     "connected": device.connected,  # might take this out since redundant with meta
@@ -170,6 +181,39 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
                 except WebSocketDisconnect:
                     logger.info(f"Connection closed while sending update for device: {device_name}")
+
+            return callback
+
+        def get_callbackReadingAsync(device_name, device_name_top, signal):
+            # ophyd-async signals pass readings as {signal_name: {"value": ..., "timestamp": ..., ...}}
+            def callback(reading):
+                for signal_name, signal_reading in reading.items():
+                    value = signal_reading["value"]
+                    if isinstance(value, np.ndarray) and value.dtype.kind in ["i", "u"]:
+                        try:
+                            # Remove null terminators and convert to string
+                            cleaned_array = value[value != 0]
+                            if len(cleaned_array) > 0:
+                                value = "".join(chr(x) for x in cleaned_array)
+                                logger.debug(f"Converted array to string for device {device_name}: {value}")
+                        except (ValueError, OverflowError):
+                            pass
+                    if isinstance(value, tuple):
+                        value = value[0]
+                    message = {
+                        "device_name": device_name,
+                        "device": device_name_top,
+                        "value": value,
+                        "timestamp": signal_reading["timestamp"],
+                        "connected": True,  # Readings are delivered only by connected signals
+                        "read_access": True,
+                        "write_access": isinstance(signal, SignalW),
+                        "signal": signal_name,
+                    }
+                    try:
+                        asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
+                    except WebSocketDisconnect:
+                        logger.info(f"Connection closed while sending update for device: {device_name}")
 
             return callback
 
@@ -203,36 +247,68 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             if subscription_allowed:
                 logger.debug(f"Subscribing to the device {device_name!r}")
 
-            if isinstance(device, (EpicsSignal, EpicsSignalRO)):
+            if is_async(device_name):
                 if subscription_allowed:
-                    cids.append(device.subscribe(get_callbackMd(device_name), event_type="meta"))
-                    cids.append(device.subscribe(get_callbackValue(device_name), event_type="value"))
-            elif isinstance(device, EpicsMotor):
-                if subscription_allowed:
-                    cids.append(device.subscribe(get_callbackValue(device_name), event_type="readback"))
-                    for signal in device.walk_signals():
-                        signal_name = f"{device_name}.{signal.dotted_name}"
-                        if signal_name not in subscriptions:
-                            cid = signal.item.subscribe(get_callbackMd(device_name), event_type="meta")
-                            subscriptions[signal_name] = {
-                                "device": signal.item,
-                                "recursive": False,
-                                "read_only": readOnly,
-                                "cids": [cid],
-                            }
-            elif isinstance(device, PseudoPositioner):
-                if subscription_allowed:
-                    cids.append(device.subscribe(get_callbackValue(device_name), event_type="readback"))
-            else:
-                if subscription_allowed:
-                    for etype in device.event_types:
-                        if etype == "meta":
-                            cids.append(device.subscribe(get_callbackMd(device_name), event_type="meta"))
-                        elif etype == "value":
-                            cids.append(device.subscribe(get_callbackValue(device_name), event_type="value"))
+                    # ophyd-async unsubscribes by callback reference, so the callback is saved as 'cid'
+                    callback = get_callbackReadingAsync(device_name, device_name_top, device)
+                    device.subscribe(callback)
+                    cids.append(callback)
                 if recursive:
                     for name in existing_devices.get(device_name, {}).get("components", []):
                         recursively_subscribe(getattr(device, name), f"{device_name}.{name}", top_level=False)
+            else:
+                if isinstance(device, (EpicsSignal, EpicsSignalRO)):
+                    if subscription_allowed:
+                        cids.append(
+                            device.subscribe(get_callbackMd(device_name, device_name_top), event_type="meta")
+                        )
+                        cids.append(
+                            device.subscribe(get_callbackValue(device_name, device_name_top), event_type="value")
+                        )
+                elif isinstance(device, EpicsMotor):
+                    if subscription_allowed:
+                        cids.append(
+                            device.subscribe(
+                                get_callbackValue(device_name, device_name_top), event_type="readback"
+                            )
+                        )
+                        for signal in device.walk_signals():
+                            signal_name = f"{device_name}.{signal.dotted_name}"
+                            if signal_name not in subscriptions:
+                                cid = signal.item.subscribe(
+                                    get_callbackMd(device_name, device_name_top), event_type="meta"
+                                )
+                                subscriptions[signal_name] = {
+                                    "device": signal.item,
+                                    "recursive": False,
+                                    "read_only": readOnly,
+                                    "cids": [cid],
+                                }
+                elif isinstance(device, PseudoPositioner):
+                    if subscription_allowed:
+                        cids.append(
+                            device.subscribe(
+                                get_callbackValue(device_name, device_name_top), event_type="readback"
+                            )
+                        )
+                else:
+                    if subscription_allowed:
+                        for etype in device.event_types:
+                            if etype == "meta":
+                                cids.append(
+                                    device.subscribe(
+                                        get_callbackMd(device_name, device_name_top), event_type="meta"
+                                    )
+                                )
+                            elif etype == "value":
+                                cids.append(
+                                    device.subscribe(
+                                        get_callbackValue(device_name, device_name_top), event_type="value"
+                                    )
+                                )
+                    if recursive:
+                        for name in existing_devices.get(device_name, {}).get("components", []):
+                            recursively_subscribe(getattr(device, name), f"{device_name}.{name}", top_level=False)
 
         recursively_subscribe(device, device_name)
 
@@ -294,25 +370,41 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             try:
                 info = subscriptions.pop(name)
                 for cid in info["cids"]:
-                    info["device"].unsubscribe(cid)
+                    remove_subscription(name, info, cid)
             except Exception as ex:
                 logger.warning(f"Failed to unsubscribe from {name!r}: {ex}")
 
         await websocket.send_json({"message": f"Unsubscribed from {device_name}"})
 
+    def remove_subscription(name, info, cid):
+        if is_async(name):
+            info["device"].clear_sub(cid)
+        else:
+            info["device"].unsubscribe(cid)
+
     def unsubscribe_all():
         for name, info in subscriptions.items():
             for cid in info["cids"]:
                 try:
-                    info["device"].unsubscribe(cid)
+                    remove_subscription(name, info, cid)
                 except Exception as ex:
                     logger.warning(f"Failed to unsubscribe from {name!r}: {ex}")
         subscriptions.clear()
 
-    async def handleRefresh():
-        for info in subscriptions.values():
+    async def handleRefresh(data):
+        timeout = data.get("timeout", None)  # Wait indefinitely if the value is None
+        if not isinstance(timeout, int | float | None):
+            await websocket.send_json({"error": "Timeout must be a number. Could not refresh devices"})
+            return
+
+        for name, info in subscriptions.items():
             try:
-                info["device"].get()
+                if is_async(name):
+                    # Only ophyd-async signals have 'get_value()', devices are refreshed via their signals
+                    if hasattr(info["device"], "get_value"):
+                        await asyncio.wait_for(info["device"].get_value(cached=False), timeout=timeout)
+                else:
+                    await asyncio.wait_for(asyncio.to_thread(info["device"].get), timeout=timeout)
             except Exception:
                 pass
 
@@ -375,7 +467,8 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             )
             return
 
-        if not isinstance(device, PseudoPositioner) and isinstance(value, (int, float)):
+        is_numeric = isinstance(value, (int, float))
+        if not is_async(device_name) and not isinstance(device, PseudoPositioner) and is_numeric:
             # Some devices (e.g. simulated 'SynAxis') do not define limits.
             low_limit = getattr(device, "low_limit", None)
             high_limit = getattr(device, "high_limit", None)
@@ -391,7 +484,8 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     return
 
         try:
-            if isinstance(value, str):
+            # ophyd-async has no 'put()', so 'set()' is used for values of all types
+            if isinstance(value, str) and not is_async(device_name):
                 await SR.device_control.device_put_handler(
                     device_name, device, value, timeout=timeout, use_complete=True
                 )
@@ -432,7 +526,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 elif action == "unsubscribe":
                     await handleUnsubscribe(data)
                 elif action == "refresh":
-                    await handleRefresh()
+                    await handleRefresh(data)
                 elif action == "set":
                     await handleSet(data)
                 else:
