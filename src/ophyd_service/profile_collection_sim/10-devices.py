@@ -13,14 +13,18 @@ from ophyd_async.core import (
     DEFAULT_TIMEOUT,
     StandardReadable,
     StandardReadableFormat,
+    StrictEnum,
     init_devices,
     soft_signal_r_and_setter,
+    soft_signal_rw,
 )
 from ophyd.sim import hw
 from ophyd_async.sim import PatternGenerator, SimPointDetector, SimStage
 
 # Load simulated ophyd devices (det1, motor1, ...) into the global namespace.
 globals().update(vars(hw()))
+rand.start_simulation()
+rand2.start_simulation()
 
 # =======================================================================================
 #                  Simulated device with periodically updated readings
@@ -49,9 +53,19 @@ class SimPeriodicDevice(ophyd.Device):
         labels={"detectors"},
     )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.noise.start_simulation()
+        self.sine.start_simulation()
+
 
 sim_periodic_device1 = SimPeriodicDevice(name="sim_periodic_device1")
 sim_periodic_device2 = SimPeriodicDevice(name="sim_periodic_device2")
+
+# def callbackValue(value, timestamp, **kwargs):
+#     print(f"{value=} {timestamp=}")
+
+# sim_periodic_device1.noise.subscribe(callbackValue, event_type="value")
 
 
 # =======================================================================================
@@ -86,6 +100,25 @@ class RandomNumberDevice(StandardReadable):
             self._set_value(self._new_value())
 
 
+class OnOffMode(StrictEnum):
+    OFF = "Off"
+    ON = "On"
+
+
+class SimpleAsyncDevice(StandardReadable):
+    """A basic ophyd-async device with soft signals of different types for testing."""
+
+    def __init__(self, name: str = ""):
+        with self.add_children_as_readables(StandardReadableFormat.HINTED_SIGNAL):
+            self.value_float = soft_signal_rw(float, 0.0)
+        with self.add_children_as_readables(StandardReadableFormat.CONFIG_SIGNAL):
+            self.value_int = soft_signal_rw(int, 0)
+            self.value_str = soft_signal_rw(str, "")
+            self.mode = soft_signal_rw(OnOffMode, OnOffMode.OFF)
+            self.value_ro, self._set_value_ro = soft_signal_r_and_setter(float, 0.0)
+        super().__init__(name)
+
+
 with init_devices():
     # Channel values are updated at 10 Hz while the detector is acquiring and depend
     # on the positions of the stage motors.
@@ -96,5 +129,7 @@ with init_devices():
     rand_async_device2 = RandomNumberDevice(period=1.0)
     rand_async_device3 = RandomNumberDevice(period=1.0)
     rand_async_device4 = RandomNumberDevice(period=1.0)
+
+    simple_async_device = SimpleAsyncDevice()
 
 # =======================================================================================

@@ -40,6 +40,7 @@ def _prepare_devices(devices, *, max_depth=0, ignore_all_subdevices_if_one_fails
 
     from bluesky import protocols
     from ophyd.areadetector import ADBase
+    from ophyd_async.core import Device as AsyncDevice
 
     def get_device_params(device, device_obj_name):
         movable_protocols = (protocols.Movable,)
@@ -52,9 +53,12 @@ def _prepare_devices(devices, *, max_depth=0, ignore_all_subdevices_if_one_fails
         #     movable_protocols = (*movable_protocols, protocols.NamedMovable)
 
         return {
+            # 'AsyncReadable' protocol also matches Ophyd devices, so check the base class
+            "is_async": isinstance(device, AsyncDevice),
             "is_readable": isinstance(device, protocols.Readable),
             "is_movable": isinstance(device, movable_protocols),
             "is_flyable": isinstance(device, protocols.Flyable),
+            "is_subscribable": isinstance(device, protocols.Subscribable),
             "classname": type(device).__name__,
             "module": type(device).__module__,
             "name": device.name if isinstance(device, protocols.HasName) else device_obj_name,
