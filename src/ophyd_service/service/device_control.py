@@ -7,6 +7,7 @@ import re
 from ophyd_async.core import SignalW
 
 from .device_registry import DeviceAccessType, DeviceRegistry
+from .service_utils import run_in_bluesky_loop
 
 logger = logging.getLogger(__name__)
 
@@ -101,20 +102,20 @@ class DeviceControl:
                 if not device_properties.get("is_readable", False):
                     raise RuntimeError(f"Method {method!r} is not supported for the device {device_name!r}")
                 if inspect.iscoroutinefunction(device_obj.read):
-                    read_task = device_obj.read()
+                    read_task = run_in_bluesky_loop(device_obj.read())
                 else:
                     read_task = asyncio.to_thread(device_obj.read)
             elif method == "describe":
                 if not device_properties.get("is_readable", False):
                     raise RuntimeError(f"Method {method!r} is not supported for the device {device_name!r}")
                 if inspect.iscoroutinefunction(device_obj.describe):
-                    read_task = device_obj.describe()
+                    read_task = run_in_bluesky_loop(device_obj.describe())
                 else:
                     read_task = asyncio.to_thread(device_obj.describe)
             elif method == "get":
                 if inspect.iscoroutinefunction(device_obj.read):
                     _check_method("get_value")
-                    read_task = device_obj.get_value()
+                    read_task = run_in_bluesky_loop(device_obj.get_value())
                 else:
                     _check_method("get")
                     read_task = asyncio.to_thread(device_obj.get)
@@ -158,7 +159,11 @@ class DeviceControl:
             timeout = self._timeout_default
 
         if isinstance(device, SignalW):
-            await device.set(value, timeout=timeout)
+            # 'set()' starts a task in the current loop when called, so it is called in the Bluesky loop.
+            async def _set():
+                await device.set(value, timeout=timeout)
+
+            await run_in_bluesky_loop(_set())
             return
 
         put_method = getattr(device, "put", None)
@@ -202,7 +207,11 @@ class DeviceControl:
 
         # ophyd-async wraps the coroutine 'set' with 'AsyncStatus.wrap', so check the unwrapped function.
         if inspect.iscoroutinefunction(inspect.unwrap(set_method)):
-            status = asyncio.ensure_future(set_method(value))
+
+            async def _set_async():
+                await set_method(value)
+
+            status = run_in_bluesky_loop(_set_async())
             try:
                 await asyncio.wait_for(asyncio.shield(status), timeout=timeout)
             except asyncio.TimeoutError as ex:

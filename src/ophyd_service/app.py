@@ -304,6 +304,8 @@ def build_app(authentication=None, api_access=None, resource_access=None, server
         # ==============================================================================
         #       TODO: ophyd-async cleanup code
         # ==============================================================================
+        if SR.device_registry is not None:
+            SR.device_registry.stop_bluesky_event_loop()
 
         for task in getattr(app.state, "tasks", []):
             task.cancel()

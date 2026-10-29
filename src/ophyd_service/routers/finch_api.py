@@ -12,6 +12,7 @@ from packaging import version
 
 from ..resources import SERVER_RESOURCES as SR
 from ..service.device_registry import DeviceAccessType
+from ..service.service_utils import run_in_bluesky_loop
 from ..settings import get_settings
 from ..utils import get_api_access_manager, get_current_username, get_resource_access_manager
 from .core_api import _authenticate_websocket
@@ -100,7 +101,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         description = existing_devices.get(device_name, {})
         return bool(description.get("is_async", False))
 
-    def addCallbacks(device_name, device, *, recursive=True, readOnly=False):
+    async def addCallbacks(device_name, device, *, recursive=True, readOnly=False):
         # different ophyd devices may have different event types that are subscribable
         # EpicsSignal: 'setpoint_meta', 'setpoint', 'meta', 'value'
         # EpicsMotor: 'start_moving', 'readback', '_req_done', 'done_moving', 'acq_done'
@@ -217,7 +218,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
             return callback
 
-        def recursively_subscribe(device, device_name, *, top_level=True):
+        async def recursively_subscribe(device, device_name, *, top_level=True):
             """
             Subscribe callbacks to the device or, for devices of unsupported types, to its components.
             Subscription is skipped if the device is not subscribable or the user group has no
@@ -249,13 +250,19 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
             if is_async(device_name):
                 if subscription_allowed:
-                    # ophyd-async unsubscribes by callback reference, so the callback is saved as 'cid'
                     callback = get_callbackReadingAsync(device_name, device_name_top, device)
-                    device.subscribe(callback)
+
+                    async def subscribe():
+                        device.subscribe(callback)
+
+                    await run_in_bluesky_loop(subscribe())
+                    # ophyd-async unsubscribes by callback reference, so the callback is saved as 'cid'
                     cids.append(callback)
                 if recursive:
                     for name in existing_devices.get(device_name, {}).get("components", []):
-                        recursively_subscribe(getattr(device, name), f"{device_name}.{name}", top_level=False)
+                        await recursively_subscribe(
+                            getattr(device, name), f"{device_name}.{name}", top_level=False
+                        )
             else:
                 if isinstance(device, (EpicsSignal, EpicsSignalRO)):
                     if subscription_allowed:
@@ -308,9 +315,11 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                                 )
                     if recursive:
                         for name in existing_devices.get(device_name, {}).get("components", []):
-                            recursively_subscribe(getattr(device, name), f"{device_name}.{name}", top_level=False)
+                            await recursively_subscribe(
+                                getattr(device, name), f"{device_name}.{name}", top_level=False
+                            )
 
-        recursively_subscribe(device, device_name)
+        await recursively_subscribe(device, device_name)
 
     async def handleSubscribe(data, requireConnection=False, readOnly=False):
         # allows user to subscribe to any device from the device registry
@@ -346,7 +355,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 return
             await websocket.send_json({"connected": False, "device": device_name})
 
-        addCallbacks(device_name, device, recursive=recursive, readOnly=readOnly)
+        await addCallbacks(device_name, device, recursive=recursive, readOnly=readOnly)
 
         await websocket.send_json({"message": f"Subscribed to device {device_name}"})
 
@@ -370,23 +379,27 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             try:
                 info = subscriptions.pop(name)
                 for cid in info["cids"]:
-                    remove_subscription(name, info, cid)
+                    await remove_subscription(name, info, cid)
             except Exception as ex:
                 logger.warning(f"Failed to unsubscribe from {name!r}: {ex}")
 
         await websocket.send_json({"message": f"Unsubscribed from {device_name}"})
 
-    def remove_subscription(name, info, cid):
+    async def remove_subscription(name, info, cid):
         if is_async(name):
-            info["device"].clear_sub(cid)
+
+            async def clear_sub():
+                info["device"].clear_sub(cid)
+
+            await run_in_bluesky_loop(clear_sub())
         else:
             info["device"].unsubscribe(cid)
 
-    def unsubscribe_all():
+    async def unsubscribe_all():
         for name, info in subscriptions.items():
             for cid in info["cids"]:
                 try:
-                    remove_subscription(name, info, cid)
+                    await remove_subscription(name, info, cid)
                 except Exception as ex:
                     logger.warning(f"Failed to unsubscribe from {name!r}: {ex}")
         subscriptions.clear()
@@ -402,7 +415,9 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 if is_async(name):
                     # Only ophyd-async signals have 'get_value()', devices are refreshed via their signals
                     if hasattr(info["device"], "get_value"):
-                        await asyncio.wait_for(info["device"].get_value(cached=False), timeout=timeout)
+                        await asyncio.wait_for(
+                            run_in_bluesky_loop(info["device"].get_value(cached=False)), timeout=timeout
+                        )
                 else:
                     await asyncio.wait_for(asyncio.to_thread(info["device"].get), timeout=timeout)
             except Exception:
@@ -543,5 +558,5 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
     except Exception as e:
         logger.error(f"Error in websocket loop: {str(e)}")
     finally:
-        unsubscribe_all()
+        await unsubscribe_all()
         logger.info("WebSocket connection closed.")
