@@ -12,7 +12,7 @@ jobs:
     permissions:
       id-token: write
 
-    if: github.repository_owner == 'bluesky'
+    if: github.repository_owner == 'dmgav'
     runs-on: ubuntu-latest
 
     env:
