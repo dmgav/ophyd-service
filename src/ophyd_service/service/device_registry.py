@@ -1,6 +1,6 @@
 import asyncio
-import enum
 import logging
+from enum import StrEnum
 
 from bluesky.run_engine import _ensure_event_loop_running, get_bluesky_event_loop, set_bluesky_event_loop
 from bluesky_queueserver.manager.profile_ops import load_worker_startup_code
@@ -19,7 +19,7 @@ from .user_permissions import load_user_group_permissions
 logger = logging.getLogger(__name__)
 
 
-class DeviceAccessType(str, enum.Enum):
+class DeviceAccessType(StrEnum):
     INFO = "info"
     READ = "read"
     WRITE_IDLE = "write_idle"
