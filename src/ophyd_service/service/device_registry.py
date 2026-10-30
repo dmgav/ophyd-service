@@ -46,6 +46,7 @@ class DeviceRegistry:
         self._demo_mode = service_config["demo_mode"]
         self._user_group_permissions_path = service_config["user_group_permissions_path"]
         self._device_max_depth = service_config["device_max_depth"]
+        self._read_only_mode = bool(service_config["read_only_mode"])
 
         self._env_exists = False
         self._ns = {}
@@ -68,6 +69,10 @@ class DeviceRegistry:
     @property
     def allowed_devices(self):
         return self._allowed_devices
+
+    @property
+    def read_only_mode(self):
+        return self._read_only_mode
 
     def _start_bluesky_event_loop(self):
         """
@@ -238,7 +243,7 @@ class DeviceRegistry:
         -------
         dict
             Dictionary with boolean values for the keys ``'read'``, ``'write_idle'``
-            and ``'write_always'``.
+            and ``'write_always'``. Write permissions are ``False`` in read-only mode.
 
         Raises
         ------
@@ -254,5 +259,9 @@ class DeviceRegistry:
         group_devices = self._allowed_devices[user_group]
         access_types = (DeviceAccessType.READ, DeviceAccessType.WRITE_IDLE, DeviceAccessType.WRITE_ALWAYS)
         permissions = {access.value: device_name in group_devices.get(access.value, {}) for access in access_types}
+
+        if self._read_only_mode:
+            permissions[DeviceAccessType.WRITE_IDLE.value] = False
+            permissions[DeviceAccessType.WRITE_ALWAYS.value] = False
 
         return permissions

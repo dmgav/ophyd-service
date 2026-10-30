@@ -42,6 +42,9 @@ properties:
       device_max_depth:
         type: integer
         description: Maximum depth of subdevices included in the list of existing devices (0 - unlimited). Default is 0.
+      read_only_mode:
+        type: boolean
+        description: Run the service in read-only mode. Default is false.
   server_configuration:
     type: [object]
     additionalProperties: false
