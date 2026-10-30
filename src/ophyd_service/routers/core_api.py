@@ -126,7 +126,7 @@ async def _authenticate_websocket(websocket, scopes):
     await websocket.accept()
     try:
         message = await asyncio.wait_for(websocket.receive_json(), timeout=10)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         await websocket.close(code=_WS_CLOSE_AUTH_REQUIRED, reason="Auth required")
         return None, True
     except WebSocketDisconnect:

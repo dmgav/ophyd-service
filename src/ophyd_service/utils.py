@@ -2,12 +2,12 @@ import builtins
 import collections
 import contextlib
 import copy
-import enum
 import importlib
 import operator
 import os
 import sys
 import time
+from enum import StrEnum
 
 from fastapi import HTTPException
 
@@ -178,7 +178,7 @@ def get_api_access_manager():
     )
 
 
-class SpecialUsers(str, enum.Enum):
+class SpecialUsers(StrEnum):
     public = _DEFAULT_USERNAME_PUBLIC
     single_user = _DEFAULT_USERNAME_SINGLE_USER
 

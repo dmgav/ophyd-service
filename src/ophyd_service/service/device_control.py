@@ -214,7 +214,7 @@ class DeviceControl:
             status = run_in_bluesky_loop(_set_async())
             try:
                 await asyncio.wait_for(asyncio.shield(status), timeout=timeout)
-            except asyncio.TimeoutError as ex:
+            except TimeoutError as ex:
                 raise TimeoutError(f"Set operation for {device_name!r} timed out after {timeout} s") from ex
         else:
 
