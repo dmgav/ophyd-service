@@ -1,6 +1,8 @@
+import asyncio
 import enum
 import logging
 
+from bluesky.run_engine import _ensure_event_loop_running, get_bluesky_event_loop, set_bluesky_event_loop
 from bluesky_queueserver.manager.profile_ops import load_worker_startup_code
 
 from .device_list import (
@@ -67,6 +69,48 @@ class DeviceRegistry:
     def allowed_devices(self):
         return self._allowed_devices
 
+    def _start_bluesky_event_loop(self):
+        """
+        Create and start the Bluesky event loop in a background thread. The existing loop
+        is reused if it is not closed.
+        """
+        loop = get_bluesky_event_loop()
+        if loop is None or loop.is_closed():
+            logger.info("Starting Bluesky event loop ...")
+            loop = asyncio.new_event_loop()
+            set_bluesky_event_loop(loop)
+        # Bluesky's helper registers the thread, so 'RunEngine' can reuse the running loop.
+        _ensure_event_loop_running(loop)
+        # Wait until the loop is running, otherwise a second thread may be started for it.
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=10)
+        logger.info("Bluesky event loop is running.")
+
+    def _stop_replaced_bluesky_event_loop(self, initial_loop):
+        """
+        'RunEngine()' created without the 'loop' parameter starts a new loop and makes it the Bluesky
+        event loop. Stop and close the loop that was replaced, since it is no longer used.
+        """
+        loop = get_bluesky_event_loop()
+        if initial_loop is None or loop is initial_loop:
+            return
+        logger.info("The startup code replaced the Bluesky event loop (e.g. by creating 'RunEngine').")
+        if initial_loop.is_running():
+            initial_loop.call_soon_threadsafe(initial_loop.stop)
+            thread = _ensure_event_loop_running.loop_to_thread.pop(initial_loop, None)
+            if thread is not None:
+                thread.join(timeout=10)
+        if not initial_loop.is_running() and not initial_loop.is_closed():
+            initial_loop.close()
+
+    def stop_bluesky_event_loop(self):
+        """
+        Stop the Bluesky event loop. The loop is not closed and is restarted by ``load_startup_code()``.
+        """
+        loop = get_bluesky_event_loop()
+        if loop is not None and loop.is_running():
+            logger.info("Stopping Bluesky event loop ...")
+            loop.call_soon_threadsafe(loop.stop)
+
     def load_startup_code(self):
         """
         Load the startup code into the namespace. IPython is used if ``use_ipython_kernel``
@@ -76,6 +120,9 @@ class DeviceRegistry:
         self._env_exists = False
 
         try:
+            self._start_bluesky_event_loop()
+            initial_loop = get_bluesky_event_loop()
+
             logger.info(f"Loading user group permissions from {self._user_group_permissions_path!r}")
             self._user_group_permissions = load_user_group_permissions(self._user_group_permissions_path)
 
@@ -95,6 +142,7 @@ class DeviceRegistry:
                     startup_script_path=self._startup_script_path,
                     nspace=self._ns,
                 )
+            self._stop_replaced_bluesky_event_loop(initial_loop)
 
             existing_devices_tree, _ = existing_plans_and_devices_from_nspace(
                 nspace=self._ns, max_depth=self._device_max_depth

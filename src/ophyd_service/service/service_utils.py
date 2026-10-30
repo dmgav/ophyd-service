@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import logging
 import os
@@ -6,9 +7,24 @@ import shutil
 import tempfile
 from datetime import datetime
 
+from bluesky.run_engine import get_bluesky_event_loop
 from bluesky_queueserver.manager.profile_ops import _split_name_pattern
 
 logger = logging.getLogger(__name__)
+
+
+async def run_in_bluesky_loop(coro):
+    """
+    Run the coroutine in the Bluesky event loop and await the result from the current loop.
+    ophyd-async devices are connected in the Bluesky event loop, so all coroutines that access
+    the devices must be executed in this loop. Cancelling the awaiting task cancels the coroutine.
+    """
+    loop = get_bluesky_event_loop()
+    if loop is None or not loop.is_running():
+        coro.close()
+        raise RuntimeError("Bluesky event loop is not running")
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return await asyncio.wrap_future(future)
 
 
 def get_timestamp_iso8601():
