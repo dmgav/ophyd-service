@@ -168,6 +168,7 @@ def default_service_config():
         "ipython_dir": None,
         "user_group_permissions_path": None,
         "device_max_depth": 0,
+        "read_only_mode": False,
     }
 
 

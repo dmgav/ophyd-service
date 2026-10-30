@@ -52,7 +52,8 @@ async def device_socket_write_handler(
     ]
     user_group = resource_access_manager.get_resource_group(username)
 
-    await websocket_endpoint(websocket, user_group=user_group, read_only=False)
+    read_only = SR.device_control.device_registry.read_only_mode
+    await websocket_endpoint(websocket, user_group=user_group, read_only=read_only)
 
 
 @router.websocket("/device-socket/read")
