@@ -87,6 +87,17 @@ are loaded from the file ``user_group_permissions_ophyd.yaml``. By default, the 
 expected to be in the startup directory. See
 ``ophyd_service/profile_collection_sim/user_group_permissions_ophyd.yaml`` for an example.
 
+**Read-only mode.** The server may be started in read-only mode, which disables write
+operations on device values regardless of the user permissions. Read-only mode is enabled
+in the ``ophyd_service_configuration`` section of the config file (default: ``false``)::
+
+    ophyd_service_configuration:
+        read_only_mode: true
+
+In read-only mode, ``write_idle`` and ``write_always`` permissions are reported as ``false``
+for all devices and the websocket ``/api/v1/device-socket`` behaves the same way as
+``/api/v1/device-socket/read`` (the ``set`` action is not allowed).
+
 
 Examples of API calls
 =====================
@@ -210,6 +221,7 @@ Finch compatible websocket
 
 ``/api/v1/device-socket`` (scope ``write:devices``)
     Subscribe to devices, receive streamed value updates and set device values.
+    If the server is running in read-only mode, the ``set`` action is not allowed.
 
 ``/api/v1/device-socket/read`` (scope ``read:devices``)
     Same as ``/api/v1/device-socket``, but the ``set`` action is not allowed.
