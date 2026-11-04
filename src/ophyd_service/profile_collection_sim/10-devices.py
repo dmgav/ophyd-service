@@ -69,6 +69,38 @@ sim_periodic_device2 = SimPeriodicDevice(name="sim_periodic_device2")
 
 
 # =======================================================================================
+#                     Additional simulated Ophyd devices (used in tests)
+
+
+class SynAxisWithLimits(ophyd.sim.SynAxis):
+    """Simulated motor with software limits (``low_limit`` and ``high_limit``)."""
+
+    def __init__(self, *args, limits=(-10, 10), **kwargs):
+        super().__init__(*args, **kwargs)
+        self._low_limit, self._high_limit = limits
+
+    @property
+    def low_limit(self):
+        return self._low_limit
+
+    @property
+    def high_limit(self):
+        return self._high_limit
+
+
+motor_limits = SynAxisWithLimits(name="motor_limits", limits=(-10, 10))
+
+signal_float = ophyd.Signal(name="signal_float", value=0.0)
+signal_str = ophyd.Signal(name="signal_str", value="")
+signal_ro = ophyd.SignalRO(name="signal_ro", value=0.0)
+
+# Read access to this device is blocked by user group permissions.
+forbidden_motor = ophyd.sim.SynAxis(name="forbidden_motor")
+# Write access to this device is blocked by user group permissions.
+motor_no_write = ophyd.sim.SynAxis(name="motor_no_write")
+
+
+# =======================================================================================
 #                          Simulated 'ophyd-async' devices
 
 _sim_pattern_generator = PatternGenerator()

@@ -13,11 +13,16 @@ user_groups:
       - null  # Allow all
     forbidden_devices_read:
       - ":^rand_async_device4:?.*"  # rand_async_device4 and it's components
+      - ":^forbidden_motor:?.*"
       # - "sim_stage_async.x"  # Block only 'sim_stage_async.x', not it's components.
     allowed_devices_write_idle:
       - null
+    forbidden_devices_write_idle:
+      - ":^motor_no_write:?.*"
     allowed_devices_write_always:
       - null
+    forbidden_devices_write_always:
+      - ":^motor_no_write:?.*"
   test_user:  # Another group used for unit tests.
     allowed_devices_read:
       - null  # Allow all
