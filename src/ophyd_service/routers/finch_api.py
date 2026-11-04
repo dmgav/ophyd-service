@@ -102,6 +102,32 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         description = existing_devices.get(device_name, {})
         return bool(description.get("is_async", False))
 
+    def get_access(device_name, obj, *, subscription_read_only):
+        """
+        Returns ``(read_access, write_access)`` for the device or component. The access reported
+        by the object (e.g. EPICS access rights or type of ophyd-async signal) is combined with
+        the user group permissions, read-only mode of the connection and the subscription.
+        """
+        try:
+            permissions = device_registry.get_device_permissions(device_name, user_group=user_group)
+        except RuntimeError:
+            permissions = {}
+
+        if is_async(device_name):
+            obj_read, obj_write = True, isinstance(obj, SignalW)
+        else:
+            obj_read = getattr(obj, "read_access", True)
+            obj_write = getattr(obj, "write_access", True)
+
+        read_access = bool(obj_read and permissions.get(DeviceAccessType.READ.value, False))
+        write_access = bool(
+            obj_write
+            and not read_only
+            and not subscription_read_only
+            and permissions.get(DeviceAccessType.WRITE.value, False)
+        )
+        return read_access, write_access
+
     async def addCallbacks(device_name, device, *, recursive=True, readOnly=False):
         # different ophyd devices may have different event types that are subscribable
         # EpicsSignal: 'setpoint_meta', 'setpoint', 'meta', 'value'
@@ -111,7 +137,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         connection_state = {"connected": None, "last_update": 0}
         device_name_top = device_name
 
-        def get_callbackMd(device_name, device_name_top):
+        def get_callbackMd(device_name, device_name_top, obj):
             def callback(**kwargs):
                 # Triggered on changes to metadata, including 'connected'
                 # Will trigger when device first connects, when the device is disconnected/reconnected
@@ -129,6 +155,9 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 message["signal"] = (
                     kwargs.get("obj", None).name if kwargs.get("obj", None) else None
                 )  # provides the specific signal name within the device
+                message["read_access"], message["write_access"] = get_access(
+                    device_name, obj, subscription_read_only=readOnly
+                )
 
                 if message.get("connected") is not None:
                     current_connection = message.get("connected")
@@ -153,7 +182,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
             return callback
 
-        def get_callbackValue(device_name, device_name_top):
+        def get_callbackValue(device_name, device_name_top, obj):
             def callback(value, timestamp, **kwargs):
                 if isinstance(value, np.ndarray) and value.dtype.kind in ["i", "u"]:
                     try:
@@ -168,15 +197,15 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                         pass
                 if isinstance(value, tuple):
                     value = value[0]
-                message = dict(kwargs)
+                read_access, write_access = get_access(device_name, obj, subscription_read_only=readOnly)
                 message = {
                     "device_name": device_name,
                     "device": device_name_top,
                     "value": value,
                     "timestamp": timestamp,
                     "connected": device.connected,  # might take this out since redundant with meta
-                    "read_access": getattr(device, "read_access", None),
-                    "write_access": getattr(device, "write_access", None),
+                    "read_access": read_access,
+                    "write_access": write_access,
                     "signal": kwargs.get("obj", None).name if kwargs.get("obj", None) else None,
                 }
                 try:
@@ -202,14 +231,15 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                             pass
                     if isinstance(value, tuple):
                         value = value[0]
+                    read_access, write_access = get_access(device_name, signal, subscription_read_only=readOnly)
                     message = {
                         "device_name": device_name,
                         "device": device_name_top,
                         "value": value,
                         "timestamp": signal_reading["timestamp"],
                         "connected": True,  # Readings are delivered only by connected signals
-                        "read_access": True,
-                        "write_access": isinstance(signal, SignalW),
+                        "read_access": read_access,
+                        "write_access": write_access,
                         "signal": signal_name,
                     }
                     try:
@@ -268,23 +298,27 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 if isinstance(device, (EpicsSignal, EpicsSignalRO)):
                     if subscription_allowed:
                         cids.append(
-                            device.subscribe(get_callbackMd(device_name, device_name_top), event_type="meta")
+                            device.subscribe(
+                                get_callbackMd(device_name, device_name_top, device), event_type="meta"
+                            )
                         )
                         cids.append(
-                            device.subscribe(get_callbackValue(device_name, device_name_top), event_type="value")
+                            device.subscribe(
+                                get_callbackValue(device_name, device_name_top, device), event_type="value"
+                            )
                         )
                 elif isinstance(device, EpicsMotor):
                     if subscription_allowed:
                         cids.append(
                             device.subscribe(
-                                get_callbackValue(device_name, device_name_top), event_type="readback"
+                                get_callbackValue(device_name, device_name_top, device), event_type="readback"
                             )
                         )
                         for signal in device.walk_signals():
                             signal_name = f"{device_name}.{signal.dotted_name}"
                             if signal_name not in subscriptions:
                                 cid = signal.item.subscribe(
-                                    get_callbackMd(device_name, device_name_top), event_type="meta"
+                                    get_callbackMd(device_name, device_name_top, device), event_type="meta"
                                 )
                                 subscriptions[signal_name] = {
                                     "device": signal.item,
@@ -296,7 +330,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     if subscription_allowed:
                         cids.append(
                             device.subscribe(
-                                get_callbackValue(device_name, device_name_top), event_type="readback"
+                                get_callbackValue(device_name, device_name_top, device), event_type="readback"
                             )
                         )
                 else:
@@ -305,13 +339,14 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                             if etype == "meta":
                                 cids.append(
                                     device.subscribe(
-                                        get_callbackMd(device_name, device_name_top), event_type="meta"
+                                        get_callbackMd(device_name, device_name_top, device), event_type="meta"
                                     )
                                 )
                             elif etype == "value":
                                 cids.append(
                                     device.subscribe(
-                                        get_callbackValue(device_name, device_name_top), event_type="value"
+                                        get_callbackValue(device_name, device_name_top, device),
+                                        event_type="value",
                                     )
                                 )
                     if recursive:

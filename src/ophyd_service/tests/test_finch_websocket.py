@@ -106,6 +106,7 @@ def _check_no_updates(ws_client, *, delay=0.5, period=2):
 
 
 _ENDPOINTS = ["/v1/device-socket", "/v1/device-socket/read"]
+_WRITE_ENDPOINT = "/v1/device-socket"
 
 
 # fmt: off
@@ -142,6 +143,8 @@ def test_finch_subscribe_ophyd_01(fastapi_server, ws_client, endpoint, recursive
         assert msg["device"] == device_name
         assert msg["signal"] == f"{device_name}_{cname}"
         assert msg["connected"] is True
+        assert msg["read_access"] is True
+        assert msg["write_access"] is (endpoint == _WRITE_ENDPOINT)
         assert isinstance(msg["value"], float)
         assert isinstance(msg["timestamp"], float)
 
@@ -163,6 +166,8 @@ def test_finch_subscribe_ophyd_02(fastapi_server, ws_client, endpoint):
     msg = _value_messages(ws_client.get_messages(), device_name)[0]
     assert msg["device"] == device_name
     assert msg["signal"] == "sim_periodic_device1_sine"
+    assert msg["read_access"] is True
+    assert msg["write_access"] is (endpoint == _WRITE_ENDPOINT)
     assert _value_messages(ws_client.get_messages(), "sim_periodic_device1.noise") == []
 
     _unsubscribe(ws_client, device_name)
@@ -214,7 +219,8 @@ def test_finch_subscribe_async_01(fastapi_server, ws_client, endpoint, recursive
 def test_finch_subscribe_async_02(fastapi_server, ws_client, endpoint):
     """
     Subscribe to an ophyd-async device with signals of different types: the initial reading
-    is received for each signal. Check that write access is reported correctly.
+    is received for each signal. Check that write access is reported correctly (no write access
+    for read-only signals and over the read-only socket).
     """
     device_name = "simple_async_device"
     write_access = {"value_float": True, "value_int": True, "value_str": True, "mode": True, "value_ro": False}
@@ -231,7 +237,8 @@ def test_finch_subscribe_async_02(fastapi_server, ws_client, endpoint):
         msg = _value_messages(ws_client.get_messages(), f"{device_name}.{cname}")[0]
         assert msg["device"] == device_name
         assert msg["signal"] == f"{device_name}-{cname}"
-        assert msg["write_access"] is access, cname
+        assert msg["read_access"] is True
+        assert msg["write_access"] is (access and endpoint == _WRITE_ENDPOINT), cname
 
     _unsubscribe(ws_client, device_name)
 
@@ -267,4 +274,61 @@ def test_finch_subscribe_repeated_01(fastapi_server, ws_client, endpoint, device
     ws_client.clear_messages()
     _subscribe(ws_client, device_name)
     assert ws_client.wait_for_condition(lambda _: _value_messages(_, component_name)), ws_client.get_messages()
+    _unsubscribe(ws_client, device_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("device_names", [
+    ["signal_float", "signal_str", "signal_ro", "motor1"],  # Ophyd
+    ["simple_async_device", "sim_stage_async"],  # ophyd-async
+    ["signal_float", "motor1", "simple_async_device", "sim_stage_async"],  # Mixed
+])
+# fmt: on
+def test_finch_refresh_01(fastapi_server, ws_client, endpoint, device_names):
+    """
+    Subscribe to multiple devices and send ``refresh``: the confirmation is sent back.
+    """
+    ws_client.connect(endpoint=endpoint)
+    for device_name in device_names:
+        _subscribe(ws_client, device_name)
+
+    ws_client.clear_messages()
+    ws_client.send({"action": "refresh"})
+    assert ws_client.wait_for_condition(_has_message("Refreshed all devices")), ws_client.get_messages()
+
+    for device_name in device_names:
+        _unsubscribe(ws_client, device_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("action", ["subscribe", "subscribeReadOnly"])
+@pytest.mark.parametrize("device_name, obj_writable, write_permitted", [
+    ("sim_periodic_device1.sine", True, True),
+    ("sim_periodic_device_no_write.sine", True, False),
+    ("simple_async_device.value_float", True, True),
+    ("simple_async_device.value_ro", False, True),
+])
+# fmt: on
+def test_finch_access_01(fastapi_server, ws_client, endpoint, action, device_name, obj_writable, write_permitted):
+    """
+    ``read_access`` and ``write_access`` reported in the value messages reflect the access
+    supported by the device, user permissions, type of the socket and type of subscription.
+    """
+    expected_write_access = (
+        obj_writable and write_permitted and endpoint == _WRITE_ENDPOINT and action == "subscribe"
+    )
+
+    ws_client.connect(endpoint=endpoint)
+    ws_client.send({"action": action, "device": device_name})
+    assert ws_client.wait_for_condition(_has_message(f"Subscribed to device {device_name}")), (
+        ws_client.get_messages()
+    )
+    assert ws_client.wait_for_condition(lambda _: _value_messages(_, device_name)), ws_client.get_messages()
+
+    msg = _value_messages(ws_client.get_messages(), device_name)[0]
+    assert msg["read_access"] is True
+    assert msg["write_access"] is expected_write_access
+
     _unsubscribe(ws_client, device_name)

@@ -19,10 +19,12 @@ user_groups:
       - null
     forbidden_devices_write_idle:
       - ":^motor_no_write:?.*"
+      - ":^sim_periodic_device_no_write:?.*"
     allowed_devices_write_always:
       - null
     forbidden_devices_write_always:
       - ":^motor_no_write:?.*"
+      - ":^sim_periodic_device_no_write:?.*"
   test_user:  # Another group used for unit tests.
     allowed_devices_read:
       - null  # Allow all

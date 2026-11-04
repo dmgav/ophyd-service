@@ -61,6 +61,8 @@ class SimPeriodicDevice(ophyd.Device):
 
 sim_periodic_device1 = SimPeriodicDevice(name="sim_periodic_device1")
 sim_periodic_device2 = SimPeriodicDevice(name="sim_periodic_device2")
+# Write access to this device is blocked by user group permissions.
+sim_periodic_device_no_write = SimPeriodicDevice(name="sim_periodic_device_no_write")
 
 # def callbackValue(value, timestamp, **kwargs):
 #     print(f"{value=} {timestamp=}")
