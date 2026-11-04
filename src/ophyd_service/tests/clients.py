@@ -1,5 +1,6 @@
 import json
 import threading
+import time as ttime
 
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
@@ -152,6 +153,30 @@ class WebSocketClient:
         """
         with self._messages_lock:
             self._messages.clear()
+
+    def wait_for_condition(self, condition, *, timeout=5):
+        """
+        Wait until the condition is satisfied by the received messages.
+
+        Parameters
+        ----------
+        condition: callable
+            Function that accepts the list of received messages and returns ``True``
+            if the condition is satisfied.
+        timeout: float
+            Timeout in seconds.
+
+        Returns
+        -------
+        bool
+            ``True`` if the condition is satisfied, ``False`` on timeout.
+        """
+        t_stop = ttime.time() + timeout
+        while ttime.time() < t_stop:
+            if condition(self.get_messages()):
+                return True
+            ttime.sleep(0.05)
+        return False
 
     def _receive_loop(self):
         websocket = self._websocket

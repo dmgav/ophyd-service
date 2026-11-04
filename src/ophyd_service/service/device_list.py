@@ -58,7 +58,9 @@ def _prepare_devices(devices, *, max_depth=0, ignore_all_subdevices_if_one_fails
             "is_readable": isinstance(device, protocols.Readable),
             "is_movable": isinstance(device, movable_protocols),
             "is_flyable": isinstance(device, protocols.Flyable),
-            "is_subscribable": isinstance(device, protocols.Subscribable),
+            # bluesky>=1.16 'Subscribable' requires 'subscribe_reading()', which Ophyd objects don't have
+            "is_subscribable": isinstance(device, protocols.Subscribable)
+            or (callable(getattr(device, "subscribe", None)) and callable(getattr(device, "clear_sub", None))),
             "classname": type(device).__name__,
             "module": type(device).__module__,
             "name": device.name if isinstance(device, protocols.HasName) else device_obj_name,
