@@ -40,12 +40,8 @@ class WebSocketClient:
         self._host = host
         self._port = port
         self._uri = None
-        if token is not None:
-            self._headers = {"Authorization": f"Bearer {token}"}
-        elif api_key is not None:
-            self._headers = {"Authorization": f"ApiKey {api_key}"}
-        else:
-            self._headers = {}
+        self._api_key = api_key
+        self._token = token
 
         self._websocket = None
         self._thread = None
@@ -60,6 +56,24 @@ class WebSocketClient:
     @property
     def endpoint(self):
         return self._endpoint
+
+    @property
+    def api_key(self):
+        return self._api_key
+
+    @api_key.setter
+    def api_key(self, api_key):
+        self._api_key = api_key
+        self._token = None
+
+    @property
+    def token(self):
+        return self._token
+
+    @token.setter
+    def token(self, token):
+        self._token = token
+        self._api_key = None
 
     @property
     def uri(self):
@@ -78,7 +92,13 @@ class WebSocketClient:
         self._host = host
         self._port = port
         self._uri = f"ws://{self._host}:{self._port}/api{self._endpoint}"
-        self._websocket = connect(self._uri, additional_headers=self._headers, open_timeout=timeout)
+        if self._token is not None:
+            headers = {"Authorization": f"Bearer {self._token}"}
+        elif self._api_key is not None:
+            headers = {"Authorization": f"ApiKey {self._api_key}"}
+        else:
+            headers = {}
+        self._websocket = connect(self._uri, additional_headers=headers, open_timeout=timeout)
         self._exit_event.clear()
         self._thread = threading.Thread(target=self._receive_loop, daemon=True)
         self._thread.start()
