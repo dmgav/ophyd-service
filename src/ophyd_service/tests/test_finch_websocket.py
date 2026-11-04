@@ -105,10 +105,14 @@ def _check_no_updates(ws_client, *, delay=0.5, period=2):
     assert _value_messages(ws_client.get_messages()) == []
 
 
+_ENDPOINTS = ["/v1/device-socket", "/v1/device-socket/read"]
+
+
 # fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
 @pytest.mark.parametrize("recursive", [None, False, True])
 # fmt: on
-def test_finch_subscribe_ophyd_01(fastapi_server, ws_client, recursive):
+def test_finch_subscribe_ophyd_01(fastapi_server, ws_client, endpoint, recursive):
     """
     Subscribe and unsubscribe from an Ophyd device: recursive subscription delivers
     updates of the components, non-recursive subscription delivers no updates (the top-level
@@ -118,7 +122,7 @@ def test_finch_subscribe_ophyd_01(fastapi_server, ws_client, recursive):
     components = ("noise", "sine")
     params = {} if recursive is None else {"recursive": recursive}
 
-    ws_client.connect()
+    ws_client.connect(endpoint=endpoint)
     _subscribe(ws_client, device_name, **params)
 
     if recursive is False:
@@ -145,13 +149,14 @@ def test_finch_subscribe_ophyd_01(fastapi_server, ws_client, recursive):
     _check_no_updates(ws_client)
 
 
-def test_finch_subscribe_ophyd_02(fastapi_server, ws_client):
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+def test_finch_subscribe_ophyd_02(fastapi_server, ws_client, endpoint):
     """
     Subscribe and unsubscribe from a component of an Ophyd device.
     """
     device_name = "sim_periodic_device1.sine"
 
-    ws_client.connect()
+    ws_client.connect(endpoint=endpoint)
     _subscribe(ws_client, device_name)
     assert ws_client.wait_for_condition(lambda _: _value_messages(_, device_name)), ws_client.get_messages()
 
@@ -165,9 +170,10 @@ def test_finch_subscribe_ophyd_02(fastapi_server, ws_client):
 
 
 # fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
 @pytest.mark.parametrize("recursive", [None, False, True])
 # fmt: on
-def test_finch_subscribe_async_01(fastapi_server, ws_client, recursive):
+def test_finch_subscribe_async_01(fastapi_server, ws_client, endpoint, recursive):
     """
     Subscribe and unsubscribe from an ophyd-async device with a periodically updated signal.
     Non-recursive subscription delivers no updates (the top-level device is not subscribable).
@@ -177,7 +183,7 @@ def test_finch_subscribe_async_01(fastapi_server, ws_client, recursive):
     signal_name = f"{device_name}.value"
     params = {} if recursive is None else {"recursive": recursive}
 
-    ws_client.connect()
+    ws_client.connect(endpoint=endpoint)
     _subscribe(ws_client, device_name, **params)
 
     if recursive is False:
@@ -204,7 +210,8 @@ def test_finch_subscribe_async_01(fastapi_server, ws_client, recursive):
     _check_no_updates(ws_client)
 
 
-def test_finch_subscribe_async_02(fastapi_server, ws_client):
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+def test_finch_subscribe_async_02(fastapi_server, ws_client, endpoint):
     """
     Subscribe to an ophyd-async device with signals of different types: the initial reading
     is received for each signal. Check that write access is reported correctly.
@@ -212,7 +219,7 @@ def test_finch_subscribe_async_02(fastapi_server, ws_client):
     device_name = "simple_async_device"
     write_access = {"value_float": True, "value_int": True, "value_str": True, "mode": True, "value_ro": False}
 
-    ws_client.connect()
+    ws_client.connect(endpoint=endpoint)
     _subscribe(ws_client, device_name)
 
     def readings_received(messages):
@@ -230,17 +237,18 @@ def test_finch_subscribe_async_02(fastapi_server, ws_client):
 
 
 # fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
 @pytest.mark.parametrize("device_name, component_name", [
     ("sim_periodic_device2", "sim_periodic_device2.sine"),
     ("rand_async_device2", "rand_async_device2.value"),
 ])
 # fmt: on
-def test_finch_subscribe_repeated_01(fastapi_server, ws_client, device_name, component_name):
+def test_finch_subscribe_repeated_01(fastapi_server, ws_client, endpoint, device_name, component_name):
     """
     Repeated subscription to a device or its component (subscribed recursively) is rejected.
     Unsubscribing from devices that are not subscribed is rejected.
     """
-    ws_client.connect()
+    ws_client.connect(endpoint=endpoint)
     _subscribe(ws_client, device_name)
 
     for name in (device_name, component_name):
