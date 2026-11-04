@@ -332,3 +332,102 @@ def test_finch_access_01(fastapi_server, ws_client, endpoint, action, device_nam
     assert msg["write_access"] is expected_write_access
 
     _unsubscribe(ws_client, device_name)
+
+
+def _set(ws_client, device_name, value):
+    """
+    Send the ``set`` request and wait for the response. Fails the test if the value
+    was not set successfully.
+
+    Parameters
+    ----------
+    ws_client: WebSocketClient
+        Connected websocket client.
+    device_name: str
+        Name of the device or component, e.g. ``'device.component'``.
+    value: int, float or str
+        The new value.
+    """
+    success_msg = f"Successfully set {device_name} to {value}"
+
+    def response_received(messages):
+        return any(isinstance(_, dict) and (_.get("message") == success_msg or "error" in _) for _ in messages)
+
+    ws_client.send({"action": "set", "device": device_name, "value": value})
+    assert ws_client.wait_for_condition(response_received), ws_client.get_messages()
+    assert _has_message(success_msg)(ws_client.get_messages()), ws_client.get_messages()
+
+
+# fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, update_name, value1, value2", [
+    # Ophyd
+    ("signal_float", "signal_float", "signal_float", 1.5, 2.5),
+    ("signal_str", "signal_str", "signal_str", "text_a", "text_b"),
+    ("motor1", "motor1", "motor1.readback", 1.0, 2.0),
+    ("motor_limits", "motor_limits", "motor_limits.readback", 1.0, 2.0),
+    # ophyd-async
+    ("simple_async_device", "simple_async_device.value_float", "simple_async_device.value_float", 1.5, 2.5),
+    ("simple_async_device", "simple_async_device.value_int", "simple_async_device.value_int", 3, 4),
+    ("simple_async_device", "simple_async_device.value_str", "simple_async_device.value_str", "text_a", "text_b"),
+    ("simple_async_device", "simple_async_device.mode", "simple_async_device.mode", "On", "Off"),
+])
+# fmt: on
+def test_finch_set_01(fastapi_server, ws_client, subscribe_name, set_name, update_name, value1, value2):
+    """
+    Set the value of a subscribed device (or a component of a subscribed device). The initial value
+    is unknown, so the device is first set to ``value1`` and then to ``value2``. Check that the update
+    with ``value2`` is received over the socket.
+    """
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    _subscribe(ws_client, subscribe_name)
+
+    _set(ws_client, set_name, value1)
+    assert ws_client.wait_for_condition(
+        lambda _: any(m["value"] == value1 for m in _value_messages(_, update_name))
+    ), ws_client.get_messages()
+
+    ws_client.clear_messages()
+    _set(ws_client, set_name, value2)
+    assert ws_client.wait_for_condition(
+        lambda _: any(m["value"] == value2 for m in _value_messages(_, update_name))
+    ), ws_client.get_messages()
+
+    _unsubscribe(ws_client, subscribe_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, error_parts", [
+    # Write access is blocked by user group permissions
+    ("motor_no_write", "motor_no_write",
+     ["Failed to set value of 'motor_no_write'", "write access is not allowed"]),
+    ("sim_periodic_device_no_write", "sim_periodic_device_no_write.sine",
+     ["Failed to set value of 'sim_periodic_device_no_write.sine'", "write access is not allowed"]),
+    # Read-only devices (Ophyd)
+    ("signal_ro", "signal_ro", ["Failed to set value of signal_ro to 1.5", "readonly"]),
+    ("motor1", "motor1.readback", ["Failed to set value of motor1.readback to 1.5", "readonly"]),
+    # Read-only signal (ophyd-async)
+    ("simple_async_device", "simple_async_device.value_ro",
+     ["Failed to set value of simple_async_device.value_ro to 1.5", "does not support 'set' operation"]),
+])
+# fmt: on
+def test_finch_set_02(fastapi_server, ws_client, subscribe_name, set_name, error_parts):
+    """
+    Setting the value of a read-only device fails: write access is blocked by user group
+    permissions or the device (signal) is read-only. Check the returned error message.
+    """
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    _subscribe(ws_client, subscribe_name)
+    ws_client.clear_messages()
+
+    ws_client.send({"action": "set", "device": set_name, "value": 1.5})
+
+    def error_received(messages):
+        return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+    assert ws_client.wait_for_condition(error_received), ws_client.get_messages()
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    for part in error_parts:
+        assert part in error_msg, error_msg
+    assert not _has_message(f"Successfully set {set_name} to 1.5")(ws_client.get_messages())
+
+    _unsubscribe(ws_client, subscribe_name)

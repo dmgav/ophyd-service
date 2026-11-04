@@ -476,7 +476,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
 
         if subscriptions[device_name]["read_only"]:
             await websocket.send_json(
-                {"error": f"Cannot set value of {device_name!r}: the device is subscribed as read-only"}
+                {"error": f"Failed to set value of {device_name!r}: the device is subscribed as read-only"}
             )
             return
 
@@ -498,7 +498,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
         write_idle = permissions[DeviceAccessType.WRITE_IDLE.value]
         if not (write_always or write_idle):
             await websocket.send_json(
-                {"error": f"Cannot set value of {device_name!r}: write access is not allowed"}
+                {"error": f"Failed to set value of {device_name!r}: write access is not allowed"}
             )
             return
 
