@@ -277,6 +277,68 @@ def test_finch_subscribe_repeated_01(fastapi_server, ws_client, endpoint, device
     _unsubscribe(ws_client, device_name)
 
 
+def _error_received(messages):
+    return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("device_name, update_name", [
+    ("signal_float", None),  # Ophyd signal (no updates unless the value is changed)
+    ("sim_periodic_device1", "sim_periodic_device1.sine"),  # Ophyd device
+    ("simple_async_device.value_float", "simple_async_device.value_float"),  # ophyd-async signal
+    ("simple_async_device", "simple_async_device.value_float"),  # ophyd-async device
+])
+# fmt: on
+def test_finch_subscribe_safely_01(fastapi_server, ws_client, endpoint, device_name, update_name):
+    """
+    'subscribeSafely' succeeds for connected Ophyd and ophyd-async devices and signals.
+    The value updates are received as for the regular subscription.
+    """
+    ws_client.connect(endpoint=endpoint)
+    ws_client.send({"action": "subscribeSafely", "device": device_name})
+    assert ws_client.wait_for_condition(_has_message(f"Subscribed to device {device_name}")), (
+        ws_client.get_messages()
+    )
+    assert not _error_received(ws_client.get_messages()), ws_client.get_messages()
+
+    if update_name:
+        assert ws_client.wait_for_condition(lambda _: _value_messages(_, update_name)), ws_client.get_messages()
+
+    _unsubscribe(ws_client, device_name)
+
+
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("device_name", [
+    "signal_disconnected",  # Ophyd signal ('get()')
+    "disconnected_async_device",  # ophyd-async device ('read()')
+    "disconnected_async_device.value_disconnected",  # ophyd-async signal ('get_value()')
+])
+def test_finch_subscribe_safely_02(fastapi_server, ws_client, endpoint, device_name):
+    """
+    'subscribeSafely' fails if the device can not be connected ('signal_disconnected',
+    'disconnected_async_device' and 'disconnected_async_device.value_disconnected' simulate such
+    Ophyd and ophyd-async devices and signals). The subscription is not created. 'subscribe' does
+    not check the connection.
+    """
+    ws_client.connect(endpoint=endpoint)
+    ws_client.send({"action": "subscribeSafely", "device": device_name})
+    assert ws_client.wait_for_condition(_error_received), ws_client.get_messages()
+
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    assert error_msg.startswith(f"Failed to connect to device {device_name}"), error_msg
+    assert "not connected" in error_msg, error_msg
+    assert not _has_message(f"Subscribed to device {device_name}")(ws_client.get_messages())
+
+    ws_client.send({"action": "unsubscribe", "device": device_name})
+    assert ws_client.wait_for_condition(_has_message(f"Not subscribed to {device_name}")), (
+        ws_client.get_messages()
+    )
+
+    _subscribe(ws_client, device_name)
+    _unsubscribe(ws_client, device_name)
+
+
 # fmt: off
 @pytest.mark.parametrize("endpoint", _ENDPOINTS)
 @pytest.mark.parametrize("device_names", [

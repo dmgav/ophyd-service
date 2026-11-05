@@ -12,6 +12,8 @@ from ophyd import Component as Cpt
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
     AsyncStatus,
+    SignalR,
+    SoftSignalBackend,
     StandardReadable,
     StandardReadableFormat,
     StrictEnum,
@@ -120,6 +122,16 @@ class SlowReadSignal(ophyd.Signal):
 signal_slow_read = SlowReadSignal(name="signal_slow_read", value=0.0, delay=2)
 
 
+class DisconnectedSignal(ophyd.Signal):
+    """Signal that simulates a device that can not be connected: 'get()' always fails."""
+
+    def get(self, **kwargs):
+        raise TimeoutError(f"Signal {self.name!r} is not connected")
+
+
+signal_disconnected = DisconnectedSignal(name="signal_disconnected", value=0.0)
+
+
 # =======================================================================================
 #                          Simulated 'ophyd-async' devices
 
@@ -171,6 +183,29 @@ class SimpleAsyncDevice(StandardReadable):
         super().__init__(name)
 
 
+class DisconnectedAsyncSignalR(SignalR):
+    """ophyd-async signal that simulates a signal that can not be connected: 'get_value()' always fails."""
+
+    async def get_value(self, cached=None):
+        raise TimeoutError(f"Signal {self.name!r} is not connected")
+
+
+class DisconnectedAsyncDevice(StandardReadable):
+    """
+    ophyd-async device that simulates a device that can not be connected: 'read()' always fails.
+    The component 'value_disconnected' simulates a signal that can not be connected.
+    """
+
+    def __init__(self, name: str = ""):
+        with self.add_children_as_readables(StandardReadableFormat.HINTED_SIGNAL):
+            self.value = soft_signal_rw(float, 0.0)
+        self.value_disconnected = DisconnectedAsyncSignalR(SoftSignalBackend(float, 0.0))
+        super().__init__(name)
+
+    async def read(self):
+        raise TimeoutError(f"Device {self.name!r} is not connected")
+
+
 class SlowAsyncDevice(StandardReadable):
     """An ophyd-async device with 'set' operation that takes 'delay' seconds to complete."""
 
@@ -199,5 +234,6 @@ with init_devices():
 
     simple_async_device = SimpleAsyncDevice()
     slow_async_device = SlowAsyncDevice(delay=2.0)
+    disconnected_async_device = DisconnectedAsyncDevice()
 
 # =======================================================================================
