@@ -548,27 +548,30 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
             return
 
         is_numeric = isinstance(value, (int, float))
-        check_limits = not is_async(device_name) and not isinstance(device, PseudoPositioner) and is_numeric
+        if not is_async(device_name) and not isinstance(device, PseudoPositioner) and is_numeric:
 
-        def get_limits():
-            # Some devices (e.g. simulated 'SynAxis') do not define limits.
-            return getattr(device, "low_limit", None), getattr(device, "high_limit", None)
+            def get_limits():
+                # Some devices (e.g. simulated 'SynAxis') do not define limits.
+                return getattr(device, "low_limit", None), getattr(device, "high_limit", None)
+
+            # Reading limits of EPICS devices may block while waiting for connection. The limits are
+            #   checked before the task is started, so that the operations are started in the order of requests.
+            low_limit, high_limit = await asyncio.to_thread(get_limits)
+            out_of_limits = (low_limit is not None and value < low_limit) or (
+                high_limit is not None and value > high_limit
+            )
+            # area detector limits have a low limit === high limit by default.
+            if out_of_limits and low_limit != high_limit:
+                await websocket.send_json(
+                    {
+                        "error": f"Failed to set value of {device_name} to {value}: Value {value} is outside "
+                        f"of limits for device {device_name}. Low limit: {low_limit}, High limit: {high_limit}"
+                    }
+                )
+                return
 
         async def run_set():
             try:
-                if check_limits:
-                    # Reading limits of EPICS devices may block while waiting for connection
-                    low_limit, high_limit = await asyncio.to_thread(get_limits)
-                    out_of_limits = (low_limit is not None and value < low_limit) or (
-                        high_limit is not None and value > high_limit
-                    )
-                    # area detector limits have a low limit === high limit by default.
-                    if out_of_limits and low_limit != high_limit:
-                        raise ValueError(
-                            f"Value {value} is outside of limits for device {device_name}. "
-                            f"Low limit: {low_limit}, High limit: {high_limit}"
-                        )
-
                 # ophyd-async has no 'put()', so 'set()' is used for values of all types
                 if isinstance(value, str) and not is_async(device_name):
                     await SR.device_control.device_put_handler(
