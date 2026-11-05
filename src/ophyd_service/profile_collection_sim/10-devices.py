@@ -123,9 +123,12 @@ signal_slow_read = SlowReadSignal(name="signal_slow_read", value=0.0, delay=2)
 
 
 class DisconnectedSignal(ophyd.Signal):
-    """Signal that simulates a device that can not be connected: 'get()' always fails."""
+    """Signal that simulates a device that can not be connected: 'get()' and 'describe()' always fail."""
 
     def get(self, **kwargs):
+        raise TimeoutError(f"Signal {self.name!r} is not connected")
+
+    def describe(self):
         raise TimeoutError(f"Signal {self.name!r} is not connected")
 
 
@@ -192,7 +195,7 @@ class DisconnectedAsyncSignalR(SignalR):
 
 class DisconnectedAsyncDevice(StandardReadable):
     """
-    ophyd-async device that simulates a device that can not be connected: 'read()' always fails.
+    ophyd-async device that simulates a device that can not be connected: 'read()' and 'describe()' always fail.
     The component 'value_disconnected' simulates a signal that can not be connected.
     """
 
@@ -203,6 +206,9 @@ class DisconnectedAsyncDevice(StandardReadable):
         super().__init__(name)
 
     async def read(self):
+        raise TimeoutError(f"Device {self.name!r} is not connected")
+
+    async def describe(self):
         raise TimeoutError(f"Device {self.name!r} is not connected")
 
 

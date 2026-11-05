@@ -17,14 +17,19 @@ user_groups:
       # - "sim_stage_async.x"  # Block only 'sim_stage_async.x', not it's components.
     allowed_devices_write_idle:
       - null
+    # Devices allowed for writing are also readable, so read-blocked devices are blocked here too.
     forbidden_devices_write_idle:
       - ":^motor_no_write:?.*"
       - ":^sim_periodic_device_no_write:?.*"
+      - ":^rand_async_device4:?.*"
+      - ":^forbidden_motor:?.*"
     allowed_devices_write_always:
       - null
     forbidden_devices_write_always:
       - ":^motor_no_write:?.*"
       - ":^sim_periodic_device_no_write:?.*"
+      - ":^rand_async_device4:?.*"
+      - ":^forbidden_motor:?.*"
   test_user:  # Another group used for unit tests.
     allowed_devices_read:
       - null  # Allow all
