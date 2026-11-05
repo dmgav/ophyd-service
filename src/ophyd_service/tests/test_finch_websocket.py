@@ -340,6 +340,46 @@ def test_finch_subscribe_safely_02(fastapi_server, ws_client, endpoint, device_n
 
 
 # fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, value", [
+    ("sim_periodic_device1", "sim_periodic_device1.sine", 0.5),  # Ophyd device
+    ("simple_async_device", "simple_async_device.value_float", 1.5),  # ophyd-async device
+    ("simple_async_device.value_int", "simple_async_device.value_int", 3),  # ophyd-async signal
+])
+# fmt: on
+def test_finch_subscribe_read_only_01(fastapi_server, ws_client, subscribe_name, set_name, value):
+    """
+    'subscribeReadOnly' delivers value updates with no write access. Setting the value of the device
+    (or a component of the device subscribed recursively) is rejected. The device can be set after
+    it is unsubscribed and subscribed again using 'subscribe'.
+    """
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    ws_client.send({"action": "subscribeReadOnly", "device": subscribe_name})
+    assert ws_client.wait_for_condition(_has_message(f"Subscribed to device {subscribe_name}")), (
+        ws_client.get_messages()
+    )
+
+    assert ws_client.wait_for_condition(lambda _: _value_messages(_, set_name)), ws_client.get_messages()
+    msg = _value_messages(ws_client.get_messages(), set_name)[0]
+    assert msg["read_access"] is True
+    assert msg["write_access"] is False
+
+    ws_client.clear_messages()
+    ws_client.send({"action": "set", "device": set_name, "value": value})
+    assert ws_client.wait_for_condition(_error_received), ws_client.get_messages()
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    assert error_msg == f"Failed to set value of {set_name!r}: the device is subscribed as read-only", error_msg
+    assert not _has_message(f"Successfully set {set_name} to {value}")(ws_client.get_messages())
+
+    # The read-only mode applies only to the subscription
+    _unsubscribe(ws_client, subscribe_name)
+    ws_client.clear_messages()
+    _subscribe(ws_client, subscribe_name)
+    _set(ws_client, set_name, value)
+
+    _unsubscribe(ws_client, subscribe_name)
+
+
+# fmt: off
 @pytest.mark.parametrize("endpoint", _ENDPOINTS)
 @pytest.mark.parametrize("device_names", [
     ["signal_float", "signal_str", "signal_ro", "motor1"],  # Ophyd
