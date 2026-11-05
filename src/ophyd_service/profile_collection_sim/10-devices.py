@@ -105,6 +105,21 @@ motor_no_write = ophyd.sim.SynAxis(name="motor_no_write")
 motor_slow = ophyd.sim.SynAxis(name="motor_slow", delay=2)
 
 
+class SlowReadSignal(ophyd.Signal):
+    """Signal with 'get()' that takes 'delay' seconds to complete."""
+
+    def __init__(self, *args, delay=2.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._delay = delay
+
+    def get(self, **kwargs):
+        ttime.sleep(self._delay)
+        return super().get(**kwargs)
+
+
+signal_slow_read = SlowReadSignal(name="signal_slow_read", value=0.0, delay=2)
+
+
 # =======================================================================================
 #                          Simulated 'ophyd-async' devices
 

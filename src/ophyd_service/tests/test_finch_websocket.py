@@ -301,6 +301,46 @@ def test_finch_refresh_01(fastapi_server, ws_client, endpoint, device_names):
         _unsubscribe(ws_client, device_name)
 
 
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+def test_finch_refresh_02(fastapi_server, ws_client, endpoint):
+    """
+    The 'refresh' request sent while the previous refresh is in progress is rejected.
+    Reading 'signal_slow_read' takes 2 s, so the first refresh takes at least 2 s.
+    """
+    device_name = "signal_slow_read"
+    refreshed_msg = "Refreshed all devices"
+
+    def n_refreshed(messages):
+        return sum(isinstance(_, dict) and _.get("message") == refreshed_msg for _ in messages)
+
+    def error_received(messages):
+        return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+    ws_client.connect(endpoint=endpoint)
+    _subscribe(ws_client, device_name)
+    ws_client.clear_messages()
+
+    ws_client.send({"action": "refresh"})
+    ws_client.send({"action": "refresh"})
+
+    # The second request is rejected while the first refresh is in progress
+    assert ws_client.wait_for_condition(error_received, timeout=1), ws_client.get_messages()
+    errors = [_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _]
+    assert errors == ["Refresh is already in progress"], ws_client.get_messages()
+    assert n_refreshed(ws_client.get_messages()) == 0
+
+    # The first refresh completes
+    assert ws_client.wait_for_condition(_has_message(refreshed_msg)), ws_client.get_messages()
+
+    # Refresh is accepted after the previous refresh is completed
+    ws_client.clear_messages()
+    ws_client.send({"action": "refresh"})
+    assert ws_client.wait_for_condition(_has_message(refreshed_msg)), ws_client.get_messages()
+    assert not error_received(ws_client.get_messages()), ws_client.get_messages()
+
+    _unsubscribe(ws_client, device_name)
+
+
 # fmt: off
 @pytest.mark.parametrize("endpoint", _ENDPOINTS)
 @pytest.mark.parametrize("action", ["subscribe", "subscribeReadOnly"])

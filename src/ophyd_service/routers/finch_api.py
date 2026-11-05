@@ -92,7 +92,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
     existing_devices = device_registry.existing_devices
     readable_devices = device_registry.allowed_devices.get(user_group, {}).get(DeviceAccessType.READ.value, {})
     subscriptions = {}
-    set_tasks = set()
+    background_tasks = set()
     supported_actions = ("subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set")
 
     def can_subscribe(device_name):
@@ -441,26 +441,50 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     logger.warning(f"Failed to unsubscribe from {name!r}: {ex}")
         subscriptions.clear()
 
+    def start_background_task(coro, *, name):
+        task = asyncio.create_task(coro, name=name)
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+
     async def handleRefresh(data):
+        """
+        Read all subscribed devices in a background task. ``timeout`` limits each read separately
+        (``None`` - no limit). Reads of Ophyd devices are still bounded by the Ophyd connection timeout.
+        Failed or timed out reads are ignored. On timeout, the read of Ophyd device continues
+        in a background thread, the read of ophyd-async signal is cancelled.
+
+        TODO: revise the logic of handling timeouts.
+        """
         timeout = data.get("timeout", None)  # Wait indefinitely if the value is None
         if not isinstance(timeout, int | float | None):
             await websocket.send_json({"error": "Timeout must be a number. Could not refresh devices"})
             return
 
-        for name, info in subscriptions.items():
-            try:
-                if is_async(name):
-                    # Only ophyd-async signals have 'get_value()', devices are refreshed via their signals
-                    if hasattr(info["device"], "get_value"):
-                        await asyncio.wait_for(
-                            run_in_bluesky_loop(info["device"].get_value(cached=False)), timeout=timeout
-                        )
-                else:
-                    await asyncio.wait_for(asyncio.to_thread(info["device"].get), timeout=timeout)
-            except Exception:
-                pass
+        if any(_.get_name() == "refresh" for _ in background_tasks):
+            await websocket.send_json({"error": "Refresh is already in progress"})
+            return
 
-        await websocket.send_json({"message": "Refreshed all devices"})
+        async def run_refresh():
+            # Subscriptions may be changed while the devices are refreshed
+            for name, info in list(subscriptions.items()):
+                try:
+                    if is_async(name):
+                        # Only ophyd-async signals have 'get_value()', devices are refreshed via their signals
+                        if hasattr(info["device"], "get_value"):
+                            await asyncio.wait_for(
+                                run_in_bluesky_loop(info["device"].get_value(cached=False)), timeout=timeout
+                            )
+                    else:
+                        await asyncio.wait_for(asyncio.to_thread(info["device"].get), timeout=timeout)
+                except Exception:
+                    pass
+
+            try:
+                await websocket.send_json({"message": "Refreshed all devices"})
+            except Exception as ex:
+                logger.info(f"Failed to send the result of 'refresh' operation: {ex}")
+
+        start_background_task(run_refresh(), name="refresh")
 
     async def handleSet(data):
         device_name = data.get("device")
@@ -553,9 +577,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                 logger.info(f"Failed to send the result of 'set' operation for {device_name!r}: {ex}")
 
         # The operation may take long time, so it is executed in the background
-        task = asyncio.create_task(run_set())
-        set_tasks.add(task)
-        task.add_done_callback(set_tasks.discard)
+        start_background_task(run_set(), name="set")
 
     try:
         while True:
@@ -603,9 +625,9 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
     except Exception as e:
         logger.error(f"Error in websocket loop: {str(e)}")
     finally:
-        # Stop waiting for running 'set' operations. The operations themselves are not stopped.
-        for task in set_tasks:
+        # Stop waiting for running 'set' and 'refresh' operations. The operations themselves are not stopped.
+        for task in background_tasks:
             task.cancel()
-        await asyncio.gather(*set_tasks, return_exceptions=True)
+        await asyncio.gather(*background_tasks, return_exceptions=True)
         await unsubscribe_all()
         logger.info("WebSocket connection closed.")
