@@ -11,6 +11,7 @@ import ophyd.sim
 from ophyd import Component as Cpt
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
+    AsyncStatus,
     StandardReadable,
     StandardReadableFormat,
     StrictEnum,
@@ -100,6 +101,8 @@ signal_ro = ophyd.SignalRO(name="signal_ro", value=0.0)
 forbidden_motor = ophyd.sim.SynAxis(name="forbidden_motor")
 # Write access to this device is blocked by user group permissions.
 motor_no_write = ophyd.sim.SynAxis(name="motor_no_write")
+# 'set' operation takes 2 seconds to complete.
+motor_slow = ophyd.sim.SynAxis(name="motor_slow", delay=2)
 
 
 # =======================================================================================
@@ -153,6 +156,21 @@ class SimpleAsyncDevice(StandardReadable):
         super().__init__(name)
 
 
+class SlowAsyncDevice(StandardReadable):
+    """An ophyd-async device with 'set' operation that takes 'delay' seconds to complete."""
+
+    def __init__(self, delay: float = 2.0, name: str = ""):
+        self._delay = delay
+        with self.add_children_as_readables(StandardReadableFormat.HINTED_SIGNAL):
+            self.readback, self._set_readback = soft_signal_r_and_setter(float, 0.0)
+        super().__init__(name)
+
+    @AsyncStatus.wrap
+    async def set(self, value: float):
+        await asyncio.sleep(self._delay)
+        self._set_readback(value)
+
+
 with init_devices():
     # Channel values are updated at 10 Hz while the detector is acquiring and depend
     # on the positions of the stage motors.
@@ -165,5 +183,6 @@ with init_devices():
     rand_async_device4 = RandomNumberDevice(period=1.0)
 
     simple_async_device = SimpleAsyncDevice()
+    slow_async_device = SlowAsyncDevice(delay=2.0)
 
 # =======================================================================================

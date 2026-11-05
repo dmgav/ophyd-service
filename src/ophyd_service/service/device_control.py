@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -28,10 +29,25 @@ class DeviceControl:
         self._timeout_default = 1
         self._connection_timeout_default = 1
         self._device_registry = device_registry
+        self._devices_busy = set()
 
     @property
     def device_registry(self):
         return self._device_registry
+
+    @contextlib.contextmanager
+    def _device_busy(self, device_name):
+        """
+        Mark the device as busy while the write operation is executed. Raises ``RuntimeError``
+        if another write operation for the device is in progress.
+        """
+        if device_name in self._devices_busy:
+            raise RuntimeError(f"Set operation for {device_name!r} is in progress")
+        self._devices_busy.add(device_name)
+        try:
+            yield
+        finally:
+            self._devices_busy.discard(device_name)
 
     async def device_info_handler(self, device_name, method, user_group):
         """
@@ -158,24 +174,25 @@ class DeviceControl:
         if timeout is None:
             timeout = self._timeout_default
 
-        if isinstance(device, SignalW):
-            # 'set()' starts a task in the current loop when called, so it is called in the Bluesky loop.
-            async def _set():
-                await device.set(value, timeout=timeout)
+        with self._device_busy(device_name):
+            if isinstance(device, SignalW):
+                # 'set()' starts a task in the current loop when called, so it is called in the Bluesky loop.
+                async def _set():
+                    await device.set(value, timeout=timeout)
 
-            await run_in_bluesky_loop(_set())
-            return
+                await run_in_bluesky_loop(_set())
+                return
 
-        put_method = getattr(device, "put", None)
-        if not callable(put_method):
-            raise RuntimeError(f"Device {device_name!r} does not support 'put' operation")
+            put_method = getattr(device, "put", None)
+            if not callable(put_method):
+                raise RuntimeError(f"Device {device_name!r} does not support 'put' operation")
 
-        # Soft signals warn about unsupported kwargs, so pass EPICS-specific kwargs only if accepted.
-        kwargs = {}
-        if "use_complete" in inspect.signature(put_method).parameters:
-            kwargs.update({"use_complete": use_complete, "wait": use_complete})
+            # Soft signals warn about unsupported kwargs, so pass EPICS-specific kwargs only if accepted.
+            kwargs = {}
+            if "use_complete" in inspect.signature(put_method).parameters:
+                kwargs.update({"use_complete": use_complete, "wait": use_complete})
 
-        await asyncio.to_thread(put_method, value, timeout=timeout, **kwargs)
+            await asyncio.to_thread(put_method, value, timeout=timeout, **kwargs)
 
     async def device_set_handler(self, device_name, device, value, *, timeout=None):
         """
@@ -201,24 +218,25 @@ class DeviceControl:
         if timeout is None:
             timeout = self._timeout_default
 
-        set_method = getattr(device, "set", None)
-        if not callable(set_method):
-            raise RuntimeError(f"Device {device_name!r} does not support 'set' operation")
+        with self._device_busy(device_name):
+            set_method = getattr(device, "set", None)
+            if not callable(set_method):
+                raise RuntimeError(f"Device {device_name!r} does not support 'set' operation")
 
-        # ophyd-async wraps the coroutine 'set' with 'AsyncStatus.wrap', so check the unwrapped function.
-        if inspect.iscoroutinefunction(inspect.unwrap(set_method)):
+            # ophyd-async wraps the coroutine 'set' with 'AsyncStatus.wrap', so check the unwrapped function.
+            if inspect.iscoroutinefunction(inspect.unwrap(set_method)):
 
-            async def _set_async():
-                await set_method(value)
+                async def _set_async():
+                    await set_method(value)
 
-            status = run_in_bluesky_loop(_set_async())
-            try:
-                await asyncio.wait_for(asyncio.shield(status), timeout=timeout)
-            except TimeoutError as ex:
-                raise TimeoutError(f"Set operation for {device_name!r} timed out after {timeout} s") from ex
-        else:
+                status = run_in_bluesky_loop(_set_async())
+                try:
+                    await asyncio.wait_for(asyncio.shield(status), timeout=timeout)
+                except TimeoutError as ex:
+                    raise TimeoutError(f"Set operation for {device_name!r} timed out after {timeout} s") from ex
+            else:
 
-            def _set():
-                set_method(value).wait(timeout=timeout)
+                def _set():
+                    set_method(value).wait(timeout=timeout)
 
-            await asyncio.to_thread(_set)
+                await asyncio.to_thread(_set)

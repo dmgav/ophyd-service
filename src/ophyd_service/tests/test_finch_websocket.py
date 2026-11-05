@@ -334,7 +334,7 @@ def test_finch_access_01(fastapi_server, ws_client, endpoint, action, device_nam
     _unsubscribe(ws_client, device_name)
 
 
-def _set(ws_client, device_name, value):
+def _set(ws_client, device_name, value, *, timeout=None):
     """
     Send the ``set`` request and wait for the response. Fails the test if the value
     was not set successfully.
@@ -347,14 +347,21 @@ def _set(ws_client, device_name, value):
         Name of the device or component, e.g. ``'device.component'``.
     value: int, float or str
         The new value.
+    timeout: float or None
+        Timeout of the operation (passed to the server) and the time to wait for the response.
+        The server default timeout is used if ``None``.
     """
     success_msg = f"Successfully set {device_name} to {value}"
 
     def response_received(messages):
         return any(isinstance(_, dict) and (_.get("message") == success_msg or "error" in _) for _ in messages)
 
-    ws_client.send({"action": "set", "device": device_name, "value": value})
-    assert ws_client.wait_for_condition(response_received), ws_client.get_messages()
+    request = {"action": "set", "device": device_name, "value": value}
+    if timeout is not None:
+        request["timeout"] = timeout
+    ws_client.send(request)
+    wait_timeout = {} if timeout is None else {"timeout": timeout}
+    assert ws_client.wait_for_condition(response_received, **wait_timeout), ws_client.get_messages()
     assert _has_message(success_msg)(ws_client.get_messages()), ws_client.get_messages()
 
 
@@ -429,5 +436,49 @@ def test_finch_set_02(fastapi_server, ws_client, subscribe_name, set_name, error
     for part in error_parts:
         assert part in error_msg, error_msg
     assert not _has_message(f"Successfully set {set_name} to 1.5")(ws_client.get_messages())
+
+    _unsubscribe(ws_client, subscribe_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, update_name", [
+    ("motor_slow", "motor_slow", "motor_slow.readback"),  # Ophyd
+    ("slow_async_device", "slow_async_device", "slow_async_device.readback"),  # ophyd-async
+])
+# fmt: on
+def test_finch_set_03(fastapi_server, ws_client, subscribe_name, set_name, update_name):
+    """
+    The 'set' request sent while the previous 'set' operation for the same device is in progress
+    is rejected. The first operation (takes 2 s) completes successfully.
+    """
+    value1, value2, timeout = 1.0, 2.0, 10
+
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    _subscribe(ws_client, subscribe_name)
+
+    # The initial value is unknown, so set the device to the known value first
+    _set(ws_client, set_name, value1, timeout=timeout)
+    ws_client.clear_messages()
+
+    ws_client.send({"action": "set", "device": set_name, "value": value2, "timeout": timeout})
+    ws_client.send({"action": "set", "device": set_name, "value": value1, "timeout": timeout})
+
+    def error_received(messages):
+        return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+    # The second request is rejected while the first operation is in progress
+    assert ws_client.wait_for_condition(error_received, timeout=1), ws_client.get_messages()
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    assert error_msg.startswith(f"Failed to set value of {set_name} to {value1}"), error_msg
+    assert "in progress" in error_msg, error_msg
+    assert not _has_message(f"Successfully set {set_name} to {value2}")(ws_client.get_messages())
+
+    # The first operation completes
+    success_msg = f"Successfully set {set_name} to {value2}"
+    assert ws_client.wait_for_condition(_has_message(success_msg), timeout=timeout), ws_client.get_messages()
+    assert ws_client.wait_for_condition(
+        lambda _: any(m["value"] == value2 for m in _value_messages(_, update_name))
+    ), ws_client.get_messages()
+    assert not _has_message(f"Successfully set {set_name} to {value1}")(ws_client.get_messages())
 
     _unsubscribe(ws_client, subscribe_name)

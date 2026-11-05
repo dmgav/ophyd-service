@@ -92,6 +92,7 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
     existing_devices = device_registry.existing_devices
     readable_devices = device_registry.allowed_devices.get(user_group, {}).get(DeviceAccessType.READ.value, {})
     subscriptions = {}
+    set_tasks = set()
     supported_actions = ("subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set")
 
     def can_subscribe(device_name):
@@ -534,19 +535,27 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
                     await websocket.send_json({"error": msg})
                     return
 
-        try:
-            # ophyd-async has no 'put()', so 'set()' is used for values of all types
-            if isinstance(value, str) and not is_async(device_name):
-                await SR.device_control.device_put_handler(
-                    device_name, device, value, timeout=timeout, use_complete=True
-                )
-            else:
-                await SR.device_control.device_set_handler(device_name, device, value, timeout=timeout)
-        except Exception as error:
-            await websocket.send_json({"error": f"Failed to set value of {device_name} to {value}: {str(error)}"})
-            return
+        async def run_set():
+            try:
+                # ophyd-async has no 'put()', so 'set()' is used for values of all types
+                if isinstance(value, str) and not is_async(device_name):
+                    await SR.device_control.device_put_handler(
+                        device_name, device, value, timeout=timeout, use_complete=True
+                    )
+                else:
+                    await SR.device_control.device_set_handler(device_name, device, value, timeout=timeout)
+                response = {"message": f"Successfully set {device_name} to {value}"}
+            except Exception as error:
+                response = {"error": f"Failed to set value of {device_name} to {value}: {str(error)}"}
+            try:
+                await websocket.send_json(response)
+            except Exception as ex:
+                logger.info(f"Failed to send the result of 'set' operation for {device_name!r}: {ex}")
 
-        await websocket.send_json({"message": f"Successfully set {device_name} to {value}"})
+        # The operation may take long time, so it is executed in the background
+        task = asyncio.create_task(run_set())
+        set_tasks.add(task)
+        task.add_done_callback(set_tasks.discard)
 
     try:
         while True:
@@ -594,5 +603,9 @@ async def websocket_endpoint(websocket: WebSocket, *, user_group, read_only=Fals
     except Exception as e:
         logger.error(f"Error in websocket loop: {str(e)}")
     finally:
+        # Stop waiting for running 'set' operations. The operations themselves are not stopped.
+        for task in set_tasks:
+            task.cancel()
+        await asyncio.gather(*set_tasks, return_exceptions=True)
         await unsubscribe_all()
         logger.info("WebSocket connection closed.")
