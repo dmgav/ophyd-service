@@ -11,6 +11,9 @@ import ophyd.sim
 from ophyd import Component as Cpt
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
+    AsyncStatus,
+    SignalR,
+    SoftSignalBackend,
     StandardReadable,
     StandardReadableFormat,
     StrictEnum,
@@ -61,11 +64,75 @@ class SimPeriodicDevice(ophyd.Device):
 
 sim_periodic_device1 = SimPeriodicDevice(name="sim_periodic_device1")
 sim_periodic_device2 = SimPeriodicDevice(name="sim_periodic_device2")
+# Write access to this device is blocked by user group permissions.
+sim_periodic_device_no_write = SimPeriodicDevice(name="sim_periodic_device_no_write")
 
 # def callbackValue(value, timestamp, **kwargs):
 #     print(f"{value=} {timestamp=}")
 
 # sim_periodic_device1.noise.subscribe(callbackValue, event_type="value")
+
+
+# =======================================================================================
+#                     Additional simulated Ophyd devices (used in tests)
+
+
+class SynAxisWithLimits(ophyd.sim.SynAxis):
+    """Simulated motor with software limits (``low_limit`` and ``high_limit``)."""
+
+    def __init__(self, *args, limits=(-10, 10), **kwargs):
+        super().__init__(*args, **kwargs)
+        self._low_limit, self._high_limit = limits
+
+    @property
+    def low_limit(self):
+        return self._low_limit
+
+    @property
+    def high_limit(self):
+        return self._high_limit
+
+
+motor_limits = SynAxisWithLimits(name="motor_limits", limits=(-10, 10))
+
+signal_float = ophyd.Signal(name="signal_float", value=0.0)
+signal_str = ophyd.Signal(name="signal_str", value="")
+signal_ro = ophyd.SignalRO(name="signal_ro", value=0.0)
+
+# Read access to this device is blocked by user group permissions.
+forbidden_motor = ophyd.sim.SynAxis(name="forbidden_motor")
+# Write access to this device is blocked by user group permissions.
+motor_no_write = ophyd.sim.SynAxis(name="motor_no_write")
+# 'set' operation takes 2 seconds to complete.
+motor_slow = ophyd.sim.SynAxis(name="motor_slow", delay=2)
+
+
+class SlowReadSignal(ophyd.Signal):
+    """Signal with 'get()' that takes 'delay' seconds to complete."""
+
+    def __init__(self, *args, delay=2.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._delay = delay
+
+    def get(self, **kwargs):
+        ttime.sleep(self._delay)
+        return super().get(**kwargs)
+
+
+signal_slow_read = SlowReadSignal(name="signal_slow_read", value=0.0, delay=2)
+
+
+class DisconnectedSignal(ophyd.Signal):
+    """Signal that simulates a device that can not be connected: 'get()' and 'describe()' always fail."""
+
+    def get(self, **kwargs):
+        raise TimeoutError(f"Signal {self.name!r} is not connected")
+
+    def describe(self):
+        raise TimeoutError(f"Signal {self.name!r} is not connected")
+
+
+signal_disconnected = DisconnectedSignal(name="signal_disconnected", value=0.0)
 
 
 # =======================================================================================
@@ -119,6 +186,47 @@ class SimpleAsyncDevice(StandardReadable):
         super().__init__(name)
 
 
+class DisconnectedAsyncSignalR(SignalR):
+    """ophyd-async signal that simulates a signal that can not be connected: 'get_value()' always fails."""
+
+    async def get_value(self, cached=None):
+        raise TimeoutError(f"Signal {self.name!r} is not connected")
+
+
+class DisconnectedAsyncDevice(StandardReadable):
+    """
+    ophyd-async device that simulates a device that can not be connected: 'read()' and 'describe()' always fail.
+    The component 'value_disconnected' simulates a signal that can not be connected.
+    """
+
+    def __init__(self, name: str = ""):
+        with self.add_children_as_readables(StandardReadableFormat.HINTED_SIGNAL):
+            self.value = soft_signal_rw(float, 0.0)
+        self.value_disconnected = DisconnectedAsyncSignalR(SoftSignalBackend(float, 0.0))
+        super().__init__(name)
+
+    async def read(self):
+        raise TimeoutError(f"Device {self.name!r} is not connected")
+
+    async def describe(self):
+        raise TimeoutError(f"Device {self.name!r} is not connected")
+
+
+class SlowAsyncDevice(StandardReadable):
+    """An ophyd-async device with 'set' operation that takes 'delay' seconds to complete."""
+
+    def __init__(self, delay: float = 2.0, name: str = ""):
+        self._delay = delay
+        with self.add_children_as_readables(StandardReadableFormat.HINTED_SIGNAL):
+            self.readback, self._set_readback = soft_signal_r_and_setter(float, 0.0)
+        super().__init__(name)
+
+    @AsyncStatus.wrap
+    async def set(self, value: float):
+        await asyncio.sleep(self._delay)
+        self._set_readback(value)
+
+
 with init_devices():
     # Channel values are updated at 10 Hz while the detector is acquiring and depend
     # on the positions of the stage motors.
@@ -131,5 +239,7 @@ with init_devices():
     rand_async_device4 = RandomNumberDevice(period=1.0)
 
     simple_async_device = SimpleAsyncDevice()
+    slow_async_device = SlowAsyncDevice(delay=2.0)
+    disconnected_async_device = DisconnectedAsyncDevice()
 
 # =======================================================================================

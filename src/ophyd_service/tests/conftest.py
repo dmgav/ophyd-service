@@ -85,6 +85,20 @@ def fastapi_server_fs(xprocess):
     xprocess.getinfo("fastapi_server").terminate()
 
 
+@pytest.fixture
+def ws_client():
+    """
+    Returns a ``WebSocketClient`` authenticated with ``API_KEY_FOR_TESTS``. The test must call
+    ``ws_client.connect()`` explicitly. The client is closed after the test.
+    """
+    # Imported here to avoid a circular import ('clients' imports from 'conftest')
+    from .clients import WebSocketClient
+
+    client = WebSocketClient(api_key=API_KEY_FOR_TESTS)
+    yield client
+    client.close()
+
+
 def setup_server_with_config_file(*, config_file_str, tmpdir, monkeypatch):
     """
     Creates config file for the server in ``tmpdir/config/`` directory and

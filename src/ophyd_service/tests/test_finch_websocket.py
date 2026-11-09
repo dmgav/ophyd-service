@@ -1,0 +1,626 @@
+import time as ttime
+
+import pytest
+
+
+def _value_messages(messages, device_name=None):
+    """
+    Select messages with device values (messages that contain the ``value`` key).
+
+    Parameters
+    ----------
+    messages: list
+        List of received messages.
+    device_name: str or None
+        Select only messages with the matching ``device_name`` (full device or component name).
+        All value messages are selected if ``None``.
+
+    Returns
+    -------
+    list
+        List of selected messages.
+    """
+    return [
+        _
+        for _ in messages
+        if isinstance(_, dict) and "value" in _ and (device_name is None or _.get("device_name") == device_name)
+    ]
+
+
+def _has_message(text):
+    """
+    Create a condition for ``WebSocketClient.wait_for_condition()`` that checks if a message
+    with the ``message`` key equal to ``text`` was received.
+
+    Parameters
+    ----------
+    text: str
+        Expected text of the message.
+
+    Returns
+    -------
+    callable
+        Function that accepts the list of messages and returns ``True`` if the message is found.
+    """
+
+    def condition(messages):
+        return any(isinstance(_, dict) and _.get("message") == text for _ in messages)
+
+    return condition
+
+
+def _subscribe(ws_client, device_name, **kwargs):
+    """
+    Send the ``subscribe`` request and wait for the confirmation. Fails the test
+    if the confirmation is not received.
+
+    Parameters
+    ----------
+    ws_client: WebSocketClient
+        Connected websocket client.
+    device_name: str
+        Name of the device or component, e.g. ``'device.component'``.
+    kwargs: dict
+        Additional parameters of the request, e.g. ``recursive=False``.
+    """
+    ws_client.send({"action": "subscribe", "device": device_name, **kwargs})
+    assert ws_client.wait_for_condition(_has_message(f"Subscribed to device {device_name}")), (
+        ws_client.get_messages()
+    )
+
+
+def _unsubscribe(ws_client, device_name):
+    """
+    Send the ``unsubscribe`` request and wait for the confirmation. Fails the test
+    if the confirmation is not received.
+
+    Parameters
+    ----------
+    ws_client: WebSocketClient
+        Connected websocket client.
+    device_name: str
+        Name of the device or component, e.g. ``'device.component'``.
+    """
+    ws_client.send({"action": "unsubscribe", "device": device_name})
+    assert ws_client.wait_for_condition(_has_message(f"Unsubscribed from {device_name}")), ws_client.get_messages()
+
+
+def _check_no_updates(ws_client, *, delay=0.5, period=2):
+    """
+    Check that no value updates are received after unsubscribing. Updates that were
+    sent before the subscription was removed are discarded after ``delay``.
+
+    Parameters
+    ----------
+    ws_client: WebSocketClient
+        Connected websocket client.
+    delay: float
+        Time in seconds before the received messages are discarded.
+    period: float
+        Time in seconds during which no value updates are expected.
+    """
+    ttime.sleep(delay)
+    ws_client.clear_messages()
+    ttime.sleep(period)
+    assert _value_messages(ws_client.get_messages()) == []
+
+
+_ENDPOINTS = ["/v1/device-socket", "/v1/device-socket/read"]
+_WRITE_ENDPOINT = "/v1/device-socket"
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("recursive", [None, False, True])
+# fmt: on
+def test_finch_subscribe_ophyd_01(fastapi_server, ws_client, endpoint, recursive):
+    """
+    Subscribe and unsubscribe from an Ophyd device: recursive subscription delivers
+    updates of the components, non-recursive subscription delivers no updates (the top-level
+    device does not generate value events). ``recursive=None`` checks the default value (enabled).
+    """
+    device_name = "sim_periodic_device1"
+    components = ("noise", "sine")
+    params = {} if recursive is None else {"recursive": recursive}
+
+    ws_client.connect(endpoint=endpoint)
+    _subscribe(ws_client, device_name, **params)
+
+    if recursive is False:
+        ttime.sleep(2)
+        assert _value_messages(ws_client.get_messages()) == []
+        _unsubscribe(ws_client, device_name)
+        return
+
+    def updates_received(messages):
+        return all(_value_messages(messages, f"{device_name}.{_}") for _ in components)
+
+    assert ws_client.wait_for_condition(updates_received), ws_client.get_messages()
+
+    for cname in components:
+        full_name = f"{device_name}.{cname}"
+        msg = _value_messages(ws_client.get_messages(), full_name)[0]
+        assert msg["device"] == device_name
+        assert msg["signal"] == f"{device_name}_{cname}"
+        assert msg["connected"] is True
+        assert msg["read_access"] is True
+        assert msg["write_access"] is (endpoint == _WRITE_ENDPOINT)
+        assert isinstance(msg["value"], float)
+        assert isinstance(msg["timestamp"], float)
+
+    _unsubscribe(ws_client, device_name)
+    _check_no_updates(ws_client)
+
+
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+def test_finch_subscribe_ophyd_02(fastapi_server, ws_client, endpoint):
+    """
+    Subscribe and unsubscribe from a component of an Ophyd device.
+    """
+    device_name = "sim_periodic_device1.sine"
+
+    ws_client.connect(endpoint=endpoint)
+    _subscribe(ws_client, device_name)
+    assert ws_client.wait_for_condition(lambda _: _value_messages(_, device_name)), ws_client.get_messages()
+
+    msg = _value_messages(ws_client.get_messages(), device_name)[0]
+    assert msg["device"] == device_name
+    assert msg["signal"] == "sim_periodic_device1_sine"
+    assert msg["read_access"] is True
+    assert msg["write_access"] is (endpoint == _WRITE_ENDPOINT)
+    assert _value_messages(ws_client.get_messages(), "sim_periodic_device1.noise") == []
+
+    _unsubscribe(ws_client, device_name)
+    _check_no_updates(ws_client)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("recursive", [None, False, True])
+# fmt: on
+def test_finch_subscribe_async_01(fastapi_server, ws_client, endpoint, recursive):
+    """
+    Subscribe and unsubscribe from an ophyd-async device with a periodically updated signal.
+    Non-recursive subscription delivers no updates (the top-level device is not subscribable).
+    ``recursive=None`` checks the default value (enabled).
+    """
+    device_name = "rand_async_device1"
+    signal_name = f"{device_name}.value"
+    params = {} if recursive is None else {"recursive": recursive}
+
+    ws_client.connect(endpoint=endpoint)
+    _subscribe(ws_client, device_name, **params)
+
+    if recursive is False:
+        ttime.sleep(2)
+        assert _value_messages(ws_client.get_messages()) == []
+        _unsubscribe(ws_client, device_name)
+        return
+
+    # The initial reading and at least one periodic update (the period is 1 s)
+    _ = ws_client.wait_for_condition(lambda _: len(_value_messages(_, signal_name)) >= 2)
+    assert _, ws_client.get_messages()
+
+    msgs = _value_messages(ws_client.get_messages(), signal_name)
+    for msg in msgs:
+        assert msg["device"] == device_name
+        assert msg["signal"] == f"{device_name}-value"
+        assert msg["connected"] is True
+        assert msg["read_access"] is True
+        assert msg["write_access"] is False
+        assert isinstance(msg["value"], float)
+    assert msgs[0]["timestamp"] < msgs[-1]["timestamp"]
+
+    _unsubscribe(ws_client, device_name)
+    _check_no_updates(ws_client)
+
+
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+def test_finch_subscribe_async_02(fastapi_server, ws_client, endpoint):
+    """
+    Subscribe to an ophyd-async device with signals of different types: the initial reading
+    is received for each signal. Check that write access is reported correctly (no write access
+    for read-only signals and over the read-only socket).
+    """
+    device_name = "simple_async_device"
+    write_access = {"value_float": True, "value_int": True, "value_str": True, "mode": True, "value_ro": False}
+
+    ws_client.connect(endpoint=endpoint)
+    _subscribe(ws_client, device_name)
+
+    def readings_received(messages):
+        return all(_value_messages(messages, f"{device_name}.{_}") for _ in write_access)
+
+    assert ws_client.wait_for_condition(readings_received), ws_client.get_messages()
+
+    for cname, access in write_access.items():
+        msg = _value_messages(ws_client.get_messages(), f"{device_name}.{cname}")[0]
+        assert msg["device"] == device_name
+        assert msg["signal"] == f"{device_name}-{cname}"
+        assert msg["read_access"] is True
+        assert msg["write_access"] is (access and endpoint == _WRITE_ENDPOINT), cname
+
+    _unsubscribe(ws_client, device_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("device_name, component_name", [
+    ("sim_periodic_device2", "sim_periodic_device2.sine"),
+    ("rand_async_device2", "rand_async_device2.value"),
+])
+# fmt: on
+def test_finch_subscribe_repeated_01(fastapi_server, ws_client, endpoint, device_name, component_name):
+    """
+    Repeated subscription to a device or its component (subscribed recursively) is rejected.
+    Unsubscribing from devices that are not subscribed is rejected.
+    """
+    ws_client.connect(endpoint=endpoint)
+    _subscribe(ws_client, device_name)
+
+    for name in (device_name, component_name):
+        ws_client.send({"action": "subscribe", "device": name})
+        _ = ws_client.wait_for_condition(_has_message(f"Already subscribed to {name}"))
+        assert _, ws_client.get_messages()
+
+    _unsubscribe(ws_client, device_name)
+
+    # Components are unsubscribed together with the device
+    for name in (device_name, component_name):
+        ws_client.send({"action": "unsubscribe", "device": name})
+        assert ws_client.wait_for_condition(_has_message(f"Not subscribed to {name}")), ws_client.get_messages()
+
+    # Subscribe again after unsubscribing
+    ws_client.clear_messages()
+    _subscribe(ws_client, device_name)
+    assert ws_client.wait_for_condition(lambda _: _value_messages(_, component_name)), ws_client.get_messages()
+    _unsubscribe(ws_client, device_name)
+
+
+def _error_received(messages):
+    return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("device_name, update_name", [
+    ("signal_float", None),  # Ophyd signal (no updates unless the value is changed)
+    ("sim_periodic_device1", "sim_periodic_device1.sine"),  # Ophyd device
+    ("simple_async_device.value_float", "simple_async_device.value_float"),  # ophyd-async signal
+    ("simple_async_device", "simple_async_device.value_float"),  # ophyd-async device
+])
+# fmt: on
+def test_finch_subscribe_safely_01(fastapi_server, ws_client, endpoint, device_name, update_name):
+    """
+    'subscribeSafely' succeeds for connected Ophyd and ophyd-async devices and signals.
+    The value updates are received as for the regular subscription.
+    """
+    ws_client.connect(endpoint=endpoint)
+    ws_client.send({"action": "subscribeSafely", "device": device_name})
+    assert ws_client.wait_for_condition(_has_message(f"Subscribed to device {device_name}")), (
+        ws_client.get_messages()
+    )
+    assert not _error_received(ws_client.get_messages()), ws_client.get_messages()
+
+    if update_name:
+        assert ws_client.wait_for_condition(lambda _: _value_messages(_, update_name)), ws_client.get_messages()
+
+    _unsubscribe(ws_client, device_name)
+
+
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("device_name", [
+    "signal_disconnected",  # Ophyd signal ('get()')
+    "disconnected_async_device",  # ophyd-async device ('read()')
+    "disconnected_async_device.value_disconnected",  # ophyd-async signal ('get_value()')
+])
+def test_finch_subscribe_safely_02(fastapi_server, ws_client, endpoint, device_name):
+    """
+    'subscribeSafely' fails if the device can not be connected ('signal_disconnected',
+    'disconnected_async_device' and 'disconnected_async_device.value_disconnected' simulate such
+    Ophyd and ophyd-async devices and signals). The subscription is not created. 'subscribe' does
+    not check the connection.
+    """
+    ws_client.connect(endpoint=endpoint)
+    ws_client.send({"action": "subscribeSafely", "device": device_name})
+    assert ws_client.wait_for_condition(_error_received), ws_client.get_messages()
+
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    assert error_msg.startswith(f"Failed to connect to device {device_name}"), error_msg
+    assert "not connected" in error_msg, error_msg
+    assert not _has_message(f"Subscribed to device {device_name}")(ws_client.get_messages())
+
+    ws_client.send({"action": "unsubscribe", "device": device_name})
+    assert ws_client.wait_for_condition(_has_message(f"Not subscribed to {device_name}")), (
+        ws_client.get_messages()
+    )
+
+    _subscribe(ws_client, device_name)
+    _unsubscribe(ws_client, device_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, value", [
+    ("sim_periodic_device1", "sim_periodic_device1.sine", 0.5),  # Ophyd device
+    ("simple_async_device", "simple_async_device.value_float", 1.5),  # ophyd-async device
+    ("simple_async_device.value_int", "simple_async_device.value_int", 3),  # ophyd-async signal
+])
+# fmt: on
+def test_finch_subscribe_read_only_01(fastapi_server, ws_client, subscribe_name, set_name, value):
+    """
+    'subscribeReadOnly' delivers value updates with no write access. Setting the value of the device
+    (or a component of the device subscribed recursively) is rejected. The device can be set after
+    it is unsubscribed and subscribed again using 'subscribe'.
+    """
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    ws_client.send({"action": "subscribeReadOnly", "device": subscribe_name})
+    assert ws_client.wait_for_condition(_has_message(f"Subscribed to device {subscribe_name}")), (
+        ws_client.get_messages()
+    )
+
+    assert ws_client.wait_for_condition(lambda _: _value_messages(_, set_name)), ws_client.get_messages()
+    msg = _value_messages(ws_client.get_messages(), set_name)[0]
+    assert msg["read_access"] is True
+    assert msg["write_access"] is False
+
+    ws_client.clear_messages()
+    ws_client.send({"action": "set", "device": set_name, "value": value})
+    assert ws_client.wait_for_condition(_error_received), ws_client.get_messages()
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    assert error_msg == f"Failed to set value of {set_name!r}: the device is subscribed as read-only", error_msg
+    assert not _has_message(f"Successfully set {set_name} to {value}")(ws_client.get_messages())
+
+    # The read-only mode applies only to the subscription
+    _unsubscribe(ws_client, subscribe_name)
+    ws_client.clear_messages()
+    _subscribe(ws_client, subscribe_name)
+    _set(ws_client, set_name, value)
+
+    _unsubscribe(ws_client, subscribe_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("device_names", [
+    ["signal_float", "signal_str", "signal_ro", "motor1"],  # Ophyd
+    ["simple_async_device", "sim_stage_async"],  # ophyd-async
+    ["signal_float", "motor1", "simple_async_device", "sim_stage_async"],  # Mixed
+])
+# fmt: on
+def test_finch_refresh_01(fastapi_server, ws_client, endpoint, device_names):
+    """
+    Subscribe to multiple devices and send ``refresh``: the confirmation is sent back.
+    """
+    ws_client.connect(endpoint=endpoint)
+    for device_name in device_names:
+        _subscribe(ws_client, device_name)
+
+    ws_client.clear_messages()
+    ws_client.send({"action": "refresh"})
+    assert ws_client.wait_for_condition(_has_message("Refreshed all devices")), ws_client.get_messages()
+
+    for device_name in device_names:
+        _unsubscribe(ws_client, device_name)
+
+
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+def test_finch_refresh_02(fastapi_server, ws_client, endpoint):
+    """
+    The 'refresh' request sent while the previous refresh is in progress is rejected.
+    Reading 'signal_slow_read' takes 2 s, so the first refresh takes at least 2 s.
+    """
+    device_name = "signal_slow_read"
+    refreshed_msg = "Refreshed all devices"
+
+    def n_refreshed(messages):
+        return sum(isinstance(_, dict) and _.get("message") == refreshed_msg for _ in messages)
+
+    def error_received(messages):
+        return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+    ws_client.connect(endpoint=endpoint)
+    _subscribe(ws_client, device_name)
+    ws_client.clear_messages()
+
+    ws_client.send({"action": "refresh"})
+    ws_client.send({"action": "refresh"})
+
+    # The second request is rejected while the first refresh is in progress
+    assert ws_client.wait_for_condition(error_received, timeout=1), ws_client.get_messages()
+    errors = [_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _]
+    assert errors == ["Refresh is already in progress"], ws_client.get_messages()
+    assert n_refreshed(ws_client.get_messages()) == 0
+
+    # The first refresh completes
+    assert ws_client.wait_for_condition(_has_message(refreshed_msg)), ws_client.get_messages()
+
+    # Refresh is accepted after the previous refresh is completed
+    ws_client.clear_messages()
+    ws_client.send({"action": "refresh"})
+    assert ws_client.wait_for_condition(_has_message(refreshed_msg)), ws_client.get_messages()
+    assert not error_received(ws_client.get_messages()), ws_client.get_messages()
+
+    _unsubscribe(ws_client, device_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("endpoint", _ENDPOINTS)
+@pytest.mark.parametrize("action", ["subscribe", "subscribeReadOnly"])
+@pytest.mark.parametrize("device_name, obj_writable, write_permitted", [
+    ("sim_periodic_device1.sine", True, True),
+    ("sim_periodic_device_no_write.sine", True, False),
+    ("simple_async_device.value_float", True, True),
+    ("simple_async_device.value_ro", False, True),
+])
+# fmt: on
+def test_finch_access_01(fastapi_server, ws_client, endpoint, action, device_name, obj_writable, write_permitted):
+    """
+    ``read_access`` and ``write_access`` reported in the value messages reflect the access
+    supported by the device, user permissions, type of the socket and type of subscription.
+    """
+    expected_write_access = (
+        obj_writable and write_permitted and endpoint == _WRITE_ENDPOINT and action == "subscribe"
+    )
+
+    ws_client.connect(endpoint=endpoint)
+    ws_client.send({"action": action, "device": device_name})
+    assert ws_client.wait_for_condition(_has_message(f"Subscribed to device {device_name}")), (
+        ws_client.get_messages()
+    )
+    assert ws_client.wait_for_condition(lambda _: _value_messages(_, device_name)), ws_client.get_messages()
+
+    msg = _value_messages(ws_client.get_messages(), device_name)[0]
+    assert msg["read_access"] is True
+    assert msg["write_access"] is expected_write_access
+
+    _unsubscribe(ws_client, device_name)
+
+
+def _set(ws_client, device_name, value, *, timeout=None):
+    """
+    Send the ``set`` request and wait for the response. Fails the test if the value
+    was not set successfully.
+
+    Parameters
+    ----------
+    ws_client: WebSocketClient
+        Connected websocket client.
+    device_name: str
+        Name of the device or component, e.g. ``'device.component'``.
+    value: int, float or str
+        The new value.
+    timeout: float or None
+        Timeout of the operation (passed to the server) and the time to wait for the response.
+        The server default timeout is used if ``None``.
+    """
+    success_msg = f"Successfully set {device_name} to {value}"
+
+    def response_received(messages):
+        return any(isinstance(_, dict) and (_.get("message") == success_msg or "error" in _) for _ in messages)
+
+    request = {"action": "set", "device": device_name, "value": value}
+    if timeout is not None:
+        request["timeout"] = timeout
+    ws_client.send(request)
+    wait_timeout = {} if timeout is None else {"timeout": timeout}
+    assert ws_client.wait_for_condition(response_received, **wait_timeout), ws_client.get_messages()
+    assert _has_message(success_msg)(ws_client.get_messages()), ws_client.get_messages()
+
+
+# fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, update_name, value1, value2", [
+    # Ophyd
+    ("signal_float", "signal_float", "signal_float", 1.5, 2.5),
+    ("signal_str", "signal_str", "signal_str", "text_a", "text_b"),
+    ("motor1", "motor1", "motor1.readback", 1.0, 2.0),
+    ("motor_limits", "motor_limits", "motor_limits.readback", 1.0, 2.0),
+    # ophyd-async
+    ("simple_async_device", "simple_async_device.value_float", "simple_async_device.value_float", 1.5, 2.5),
+    ("simple_async_device", "simple_async_device.value_int", "simple_async_device.value_int", 3, 4),
+    ("simple_async_device", "simple_async_device.value_str", "simple_async_device.value_str", "text_a", "text_b"),
+    ("simple_async_device", "simple_async_device.mode", "simple_async_device.mode", "On", "Off"),
+])
+# fmt: on
+def test_finch_set_01(fastapi_server, ws_client, subscribe_name, set_name, update_name, value1, value2):
+    """
+    Set the value of a subscribed device (or a component of a subscribed device). The initial value
+    is unknown, so the device is first set to ``value1`` and then to ``value2``. Check that the update
+    with ``value2`` is received over the socket.
+    """
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    _subscribe(ws_client, subscribe_name)
+
+    _set(ws_client, set_name, value1)
+    assert ws_client.wait_for_condition(
+        lambda _: any(m["value"] == value1 for m in _value_messages(_, update_name))
+    ), ws_client.get_messages()
+
+    ws_client.clear_messages()
+    _set(ws_client, set_name, value2)
+    assert ws_client.wait_for_condition(
+        lambda _: any(m["value"] == value2 for m in _value_messages(_, update_name))
+    ), ws_client.get_messages()
+
+    _unsubscribe(ws_client, subscribe_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, error_parts", [
+    # Write access is blocked by user group permissions
+    ("motor_no_write", "motor_no_write",
+     ["Failed to set value of 'motor_no_write'", "write access is not allowed"]),
+    ("sim_periodic_device_no_write", "sim_periodic_device_no_write.sine",
+     ["Failed to set value of 'sim_periodic_device_no_write.sine'", "write access is not allowed"]),
+    # Read-only devices (Ophyd)
+    ("signal_ro", "signal_ro", ["Failed to set value of signal_ro to 1.5", "readonly"]),
+    ("motor1", "motor1.readback", ["Failed to set value of motor1.readback to 1.5", "readonly"]),
+    # Read-only signal (ophyd-async)
+    ("simple_async_device", "simple_async_device.value_ro",
+     ["Failed to set value of simple_async_device.value_ro to 1.5", "does not support 'set' operation"]),
+])
+# fmt: on
+def test_finch_set_02(fastapi_server, ws_client, subscribe_name, set_name, error_parts):
+    """
+    Setting the value of a read-only device fails: write access is blocked by user group
+    permissions or the device (signal) is read-only. Check the returned error message.
+    """
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    _subscribe(ws_client, subscribe_name)
+    ws_client.clear_messages()
+
+    ws_client.send({"action": "set", "device": set_name, "value": 1.5})
+
+    def error_received(messages):
+        return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+    assert ws_client.wait_for_condition(error_received), ws_client.get_messages()
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    for part in error_parts:
+        assert part in error_msg, error_msg
+    assert not _has_message(f"Successfully set {set_name} to 1.5")(ws_client.get_messages())
+
+    _unsubscribe(ws_client, subscribe_name)
+
+
+# fmt: off
+@pytest.mark.parametrize("subscribe_name, set_name, update_name", [
+    ("motor_slow", "motor_slow", "motor_slow.readback"),  # Ophyd
+    ("slow_async_device", "slow_async_device", "slow_async_device.readback"),  # ophyd-async
+])
+# fmt: on
+def test_finch_set_03(fastapi_server, ws_client, subscribe_name, set_name, update_name):
+    """
+    The 'set' request sent while the previous 'set' operation for the same device is in progress
+    is rejected. The first operation (takes 2 s) completes successfully.
+    """
+    value1, value2, timeout = 1.0, 2.0, 10
+
+    ws_client.connect(endpoint=_WRITE_ENDPOINT)
+    _subscribe(ws_client, subscribe_name)
+
+    # The initial value is unknown, so set the device to the known value first
+    _set(ws_client, set_name, value1, timeout=timeout)
+    ws_client.clear_messages()
+
+    ws_client.send({"action": "set", "device": set_name, "value": value2, "timeout": timeout})
+    ws_client.send({"action": "set", "device": set_name, "value": value1, "timeout": timeout})
+
+    def error_received(messages):
+        return any(isinstance(_, dict) and "error" in _ for _ in messages)
+
+    # The second request is rejected while the first operation is in progress
+    assert ws_client.wait_for_condition(error_received, timeout=1), ws_client.get_messages()
+    error_msg = next(_["error"] for _ in ws_client.get_messages() if isinstance(_, dict) and "error" in _)
+    assert error_msg.startswith(f"Failed to set value of {set_name} to {value1}"), error_msg
+    assert "in progress" in error_msg, error_msg
+    assert not _has_message(f"Successfully set {set_name} to {value2}")(ws_client.get_messages())
+
+    # The first operation completes
+    success_msg = f"Successfully set {set_name} to {value2}"
+    assert ws_client.wait_for_condition(_has_message(success_msg), timeout=timeout), ws_client.get_messages()
+    assert ws_client.wait_for_condition(
+        lambda _: any(m["value"] == value2 for m in _value_messages(_, update_name))
+    ), ws_client.get_messages()
+    assert not _has_message(f"Successfully set {set_name} to {value1}")(ws_client.get_messages())
+
+    _unsubscribe(ws_client, subscribe_name)

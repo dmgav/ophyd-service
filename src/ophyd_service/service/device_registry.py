@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 class DeviceAccessType(StrEnum):
     INFO = "info"
     READ = "read"
+    WRITE = "write"
     WRITE_IDLE = "write_idle"
     WRITE_ALWAYS = "write_always"
 
@@ -47,6 +48,7 @@ class DeviceRegistry:
         self._user_group_permissions_path = service_config["user_group_permissions_path"]
         self._device_max_depth = service_config["device_max_depth"]
         self._read_only_mode = bool(service_config["read_only_mode"])
+        self._idle_mode = True
 
         self._env_exists = False
         self._ns = {}
@@ -73,6 +75,10 @@ class DeviceRegistry:
     @property
     def read_only_mode(self):
         return self._read_only_mode
+
+    @property
+    def idle_mode(self):
+        return self._idle_mode
 
     def _start_bluesky_event_loop(self):
         """
@@ -242,8 +248,10 @@ class DeviceRegistry:
         Returns
         -------
         dict
-            Dictionary with boolean values for the keys ``'read'``, ``'write_idle'``
-            and ``'write_always'``. Write permissions are ``False`` in read-only mode.
+            Dictionary with boolean values for the keys ``'read'``, ``'write_idle'``,
+            ``'write_always'`` and ``'write'``. Write permissions are ``False`` in read-only mode.
+            ``'write'`` is the current write permission: ``'write_idle'`` if the system is idle,
+            ``'write_always'`` otherwise.
 
         Raises
         ------
@@ -263,5 +271,8 @@ class DeviceRegistry:
         if self._read_only_mode:
             permissions[DeviceAccessType.WRITE_IDLE.value] = False
             permissions[DeviceAccessType.WRITE_ALWAYS.value] = False
+
+        current_write = DeviceAccessType.WRITE_IDLE if self._idle_mode else DeviceAccessType.WRITE_ALWAYS
+        permissions[DeviceAccessType.WRITE.value] = permissions[current_write.value]
 
         return permissions
